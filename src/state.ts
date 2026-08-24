@@ -123,10 +123,12 @@ export function isInstanceMetadata(value: unknown): value is InstanceMetadata {
     && typeof value.slug === "string"
     && typeof value.repoKey === "string"
     && typeof value.worktreePath === "string"
+    && (value.worktreeOwner === undefined || value.worktreeOwner === "branchlift" || value.worktreeOwner === "external")
     && typeof value.snapshot === "string"
     && typeof value.composeFile === "string"
     && (value.composeFiles === undefined || stringArray(value.composeFiles))
     && typeof value.overrideFile === "string"
+    && (value.volumeRoot === undefined || typeof value.volumeRoot === "string")
     && typeof value.composeProject === "string"
     && typeof value.createdAt === "string"
     && typeof value.updatedAt === "string"

@@ -72,6 +72,7 @@ export interface SnapshotMetadata {
 }
 
 export type InstanceStatus = "creating" | "running" | "stopped" | "failed";
+export type WorktreeOwner = "branchlift" | "external";
 
 export interface PublishedPort {
   service: string;
@@ -89,10 +90,12 @@ export interface InstanceMetadata {
   repoKey: string;
   sourceRoot: string;
   worktreePath: string;
+  worktreeOwner?: WorktreeOwner;
   snapshot: string;
   composeFile: string;
   composeFiles?: string[];
   overrideFile: string;
+  volumeRoot?: string;
   composeProject: string;
   createdAt: string;
   updatedAt: string;

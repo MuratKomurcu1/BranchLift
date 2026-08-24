@@ -1,4 +1,4 @@
-import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { generateOverride, volumeDirectoryName } from "./compose.js";
@@ -9,7 +9,7 @@ import {
   publishedPorts,
   validateCompose,
 } from "./docker.js";
-import { BranchLiftError } from "./errors.js";
+import { BranchLiftError, errorDetail } from "./errors.js";
 import { assertCommittedHead, createWorktree, removeCleanWorktree } from "./git.js";
 import { instanceLockScope, snapshotLockScope, withLock } from "./lock.js";
 import {
@@ -33,6 +33,7 @@ import type {
   BranchLiftConfig,
   InstanceMetadata,
   RepoInfo,
+  WorktreeOwner,
 } from "./types.js";
 
 export interface SpawnOptions {
@@ -40,6 +41,8 @@ export interface SpawnOptions {
   start: boolean;
   agentCommand: string[];
 }
+
+export type AttachOptions = SpawnOptions;
 
 export interface StartOptions {
   agentCommand: string[];
@@ -73,18 +76,57 @@ export async function spawnInstance(
   options: SpawnOptions,
 ): Promise<InstanceMetadata> {
   const metadata = await withLock(repo, instanceLockScope(branch), "spawn", async () => {
-    return await spawnInstanceLocked(repo, config, inspection, branch, options);
+    const slug = safeSlug(branch);
+    return await provisionInstanceLocked(
+      repo,
+      config,
+      inspection,
+      branch,
+      options,
+      worktreeRoot(repo, slug),
+      "branchlift",
+      true,
+      "spawn",
+    );
   });
   await launchAgent(metadata, join(instanceRoot(repo, metadata.slug), "context.json"), options.agentCommand);
   return metadata;
 }
 
-async function spawnInstanceLocked(
+export async function attachInstance(
+  repo: RepoInfo,
+  config: BranchLiftConfig,
+  inspection: ComposeInspection,
+  branch: string,
+  options: AttachOptions,
+): Promise<InstanceMetadata> {
+  const metadata = await withLock(repo, instanceLockScope(branch), "attach", async () => {
+    return await provisionInstanceLocked(
+      repo,
+      config,
+      inspection,
+      branch,
+      options,
+      repo.root,
+      "external",
+      false,
+      "attach",
+    );
+  });
+  await launchAgent(metadata, join(instanceRoot(repo, metadata.slug), "context.json"), options.agentCommand);
+  return metadata;
+}
+
+async function provisionInstanceLocked(
   repo: RepoInfo,
   config: BranchLiftConfig,
   inspection: ComposeInspection,
   branch: string,
   options: SpawnOptions,
+  worktreePath: string,
+  worktreeOwner: WorktreeOwner,
+  createGitWorktree: boolean,
+  operation: "spawn" | "attach",
 ): Promise<InstanceMetadata> {
   if (inspection.blockers.length > 0) {
     throw new BranchLiftError("Compose project is not safely isolatable.", inspection.blockers.join("\n"));
@@ -92,12 +134,12 @@ async function spawnInstanceLocked(
   await assertCommittedHead(repo);
   const slug = safeSlug(branch);
   const root = instanceRoot(repo, slug);
-  const prepared = await withLock(repo, snapshotLockScope(options.snapshot), "spawn", async () => {
+  const prepared = await withLock(repo, snapshotLockScope(options.snapshot), operation, async () => {
     const snapshot = await readSnapshotMetadata(repo, options.snapshot);
     if (snapshot.status !== "ready") throw new BranchLiftError(`Snapshot is not ready: ${options.snapshot}`);
     if (await pathExists(root)) throw new BranchLiftError(`Instance already exists for branch ${branch}.`);
-    const worktreePath = worktreeRoot(repo, slug);
-    await createWorktree(repo, branch, worktreePath);
+    if (createGitWorktree) await createWorktree(repo, branch, worktreePath);
+    else if (!(await pathExists(worktreePath))) throw new BranchLiftError(`Worktree is missing: ${worktreePath}`);
     await createExclusiveDirectory(root);
 
     const volumeRoot = join(root, "volumes");
@@ -116,10 +158,12 @@ async function spawnInstanceLocked(
       repoKey: repo.key,
       sourceRoot: repo.root,
       worktreePath,
+      worktreeOwner,
       snapshot: options.snapshot,
       composeFile: primaryComposeFile,
       composeFiles: config.compose.files,
       overrideFile,
+      volumeRoot,
       composeProject,
       createdAt: now,
       updatedAt: now,
@@ -128,9 +172,9 @@ async function spawnInstanceLocked(
       copyStrategy: "empty",
     };
     await writeInstanceMetadata(repo, slug, metadata);
-    return { snapshot, metadata, volumeRoot, overrideFile, composeFiles, composeProject, worktreePath };
+    return { snapshot, metadata, volumeRoot, overrideFile, composeFiles, composeProject };
   });
-  const { snapshot, metadata, volumeRoot, overrideFile, composeFiles, composeProject, worktreePath } = prepared;
+  const { snapshot, metadata, volumeRoot, overrideFile, composeFiles, composeProject } = prepared;
 
   try {
     for (const volume of snapshot.volumeNames) {
@@ -253,27 +297,52 @@ async function resetInstanceLocked(
   assertInspectionSafe(inspection);
   const snapshot = await readSnapshotMetadata(repo, metadata.snapshot);
   const root = instanceRoot(repo, slug);
+  const hadVolumeRoot = metadata.volumeRoot !== undefined;
+  const previousVolumeRoot = metadata.volumeRoot ?? join(root, "volumes");
+  const previousOverrideFile = metadata.overrideFile;
+  assertManagedChild(previousVolumeRoot, root);
+  assertManagedChild(previousOverrideFile, root);
+  let pendingVolumeRoot: string | undefined;
+  let pendingOverrideFile: string | undefined;
+  let generationAdopted = false;
   try {
     await composeDownBestEffort(runtimeFromMetadata(metadata));
-    const volumeRoot = join(root, "volumes");
-    assertManagedChild(volumeRoot, root);
-    await mkdir(volumeRoot, { recursive: true });
+    const generation = randomUUID().slice(0, 8);
+    const volumeRoot = join(root, `volumes-${generation}`);
+    const overrideFile = join(root, `compose-${generation}.override.yaml`);
+    pendingVolumeRoot = volumeRoot;
+    pendingOverrideFile = overrideFile;
+    await createExclusiveDirectory(volumeRoot);
     let copyStrategy: CopyStrategy = "empty";
     for (const volume of snapshot.volumeNames) {
       const source = join(snapshotRoot(repo, metadata.snapshot), "volumes", volumeDirectoryName(volume));
       const destination = join(volumeRoot, volumeDirectoryName(volume));
-      await mkdir(destination, { recursive: true });
-      await clearDirectory(destination, volumeRoot);
       copyStrategy = mergeStrategies(copyStrategy, await cloneDirectory(source, destination));
     }
 
+    await writeFile(overrideFile, generateOverride(inspection, volumeRoot, { randomizePorts: true }));
+    const runtime = {
+      cwd: metadata.worktreePath,
+      composeFiles: (metadata.composeFiles ?? [metadata.composeFile]).map((file) => resolve(metadata.worktreePath, file)),
+      overrideFile,
+      project: metadata.composeProject,
+    };
+    await validateCompose(runtime);
+
     metadata.copyStrategy = copyStrategy;
     metadata.ports = [];
+    metadata.volumeRoot = volumeRoot;
+    metadata.overrideFile = overrideFile;
+    metadata.status = "creating";
     delete metadata.error;
+    metadata.updatedAt = new Date().toISOString();
+    await writeInstanceMetadata(repo, slug, metadata);
+    generationAdopted = true;
+    await writeJsonAtomic(join(root, "context.json"), instanceContext(metadata));
     if (start) {
       await assertDockerReady();
-      await composeUp(runtimeFromMetadata(metadata), config.snapshot.healthTimeoutSeconds);
-      metadata.ports = await publishedPorts(runtimeFromMetadata(metadata), inspection);
+      await composeUp(runtime, config.snapshot.healthTimeoutSeconds);
+      metadata.ports = await publishedPorts(runtime, inspection);
       metadata.status = "running";
     } else {
       metadata.status = "stopped";
@@ -281,7 +350,24 @@ async function resetInstanceLocked(
     metadata.updatedAt = new Date().toISOString();
     await writeInstanceMetadata(repo, slug, metadata);
     await writeJsonAtomic(join(root, "context.json"), instanceContext(metadata));
+    if (previousVolumeRoot !== volumeRoot) {
+      await rm(previousVolumeRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
+    if (previousOverrideFile !== overrideFile) {
+      await rm(previousOverrideFile, { force: true }).catch(() => undefined);
+    }
   } catch (error) {
+    if (!generationAdopted) {
+      if (pendingVolumeRoot !== undefined) {
+        await rm(pendingVolumeRoot, { recursive: true, force: true }).catch(() => undefined);
+      }
+      if (pendingOverrideFile !== undefined) {
+        await rm(pendingOverrideFile, { force: true }).catch(() => undefined);
+      }
+      metadata.overrideFile = previousOverrideFile;
+      if (hadVolumeRoot) metadata.volumeRoot = previousVolumeRoot;
+      else delete metadata.volumeRoot;
+    }
     await markInstanceFailed(repo, slug, metadata, error);
     throw error;
   }
@@ -307,6 +393,12 @@ async function destroyInstanceLocked(
   const root = instanceRoot(repo, slug);
   if (!(await pathExists(root))) throw new BranchLiftError(`No BranchLift instance found for branch ${branch}.`);
   const metadata = await readInstanceMetadata(repo, slug);
+  if (removeWorktree && metadata.worktreeOwner === "external") {
+    throw new BranchLiftError(
+      `Refusing to remove an externally owned worktree: ${metadata.worktreePath}`,
+      `Run branchlift destroy ${branch} without --worktree; remove the worktree yourself if desired.`,
+    );
+  }
   const runtime = runtimeFromMetadata(metadata);
   if ((await Promise.all(runtime.composeFiles.map(async (file) => await pathExists(file)))).every(Boolean) && (await pathExists(runtime.overrideFile))) {
     await composeDownBestEffort(runtime);
@@ -424,15 +516,6 @@ function assertManagedChild(path: string, parent: string): void {
   }
 }
 
-async function clearDirectory(path: string, managedParent: string): Promise<void> {
-  assertManagedChild(path, managedParent);
-  for (const entry of await readdir(path)) {
-    const child = join(path, entry);
-    assertManagedChild(child, path);
-    await rm(child, { recursive: true, force: true });
-  }
-}
-
 async function markInstanceFailed(
   repo: RepoInfo,
   slug: string,
@@ -441,7 +524,7 @@ async function markInstanceFailed(
 ): Promise<void> {
   metadata.status = "failed";
   metadata.ports = [];
-  metadata.error = error instanceof Error ? error.message : String(error);
+  metadata.error = errorDetail(error);
   metadata.updatedAt = new Date().toISOString();
   await writeInstanceMetadata(repo, slug, metadata);
   await writeJsonAtomic(join(instanceRoot(repo, slug), "context.json"), instanceContext(metadata));

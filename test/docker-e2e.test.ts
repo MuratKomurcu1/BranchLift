@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -33,7 +33,27 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
       await run(process.execPath, [cli, "snapshot", "list", "--json"], root, env),
     ) as Array<{ name: string; status: string }>;
     assert.deepEqual(snapshots.map(({ name, status }) => ({ name, status })), [{ name: "dev", status: "ready" }]);
+
+    const attached = JSON.parse(
+      await run(process.execPath, [cli, "attach", "--json"], root, env),
+    ) as InstanceMetadata;
+    assert.equal(attached.branch, "main");
+    assert.equal(attached.worktreeOwner, "external");
+    assert.equal(await realpath(attached.worktreePath), await realpath(root));
+    assert.equal(await probe(attached, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
+    const removeAttachedWorktree = await runCommand(
+      process.execPath,
+      [cli, "destroy", "main", "--worktree"],
+      { cwd: root, env, allowFailure: true },
+    );
+    assert.equal(removeAttachedWorktree.exitCode, 1);
+    assert.match(removeAttachedWorktree.stderr, /externally owned worktree/);
+    assert.equal(await probe(attached, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
+    await run(process.execPath, [cli, "destroy", "main"], root, env);
+    assert.match(await readFile(join(root, "compose.yaml"), "utf8"), /postgres/);
+
     const first = JSON.parse(await run(process.execPath, [cli, "spawn", "agent-a", "--json"], root, env)) as InstanceMetadata;
+    assert.ok(first.volumeRoot);
     assert.equal(await probe(first, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
 
     await run(
@@ -164,6 +184,11 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     const instances = JSON.parse(await run(process.execPath, [cli, "list", "--json"], root, env)) as InstanceMetadata[];
     const resetFirst = instances.find((instance) => instance.branch === "agent-a");
     assert.ok(resetFirst);
+    assert.ok(resetFirst.volumeRoot);
+    assert.notEqual(resetFirst.volumeRoot, first.volumeRoot);
+    assert.notEqual(resetFirst.overrideFile, first.overrideFile);
+    await assert.rejects(readdir(first.volumeRoot), /ENOENT/);
+    await assert.rejects(readFile(first.overrideFile, "utf8"), /ENOENT/);
     assert.equal(await probe(resetFirst, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
 
     await run(process.execPath, [cli, "destroy", "agent-a", "--worktree"], root, env);
@@ -181,7 +206,9 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
       try {
         const instances = JSON.parse(listed.stdout) as InstanceMetadata[];
         for (const instance of instances) {
-          await runCommand(process.execPath, [cli, "destroy", instance.branch, "--worktree"], {
+          const destroyArgs = [cli, "destroy", instance.branch];
+          if (instance.worktreeOwner !== "external") destroyArgs.push("--worktree");
+          await runCommand(process.execPath, destroyArgs, {
             cwd: root,
             env,
             allowFailure: true,

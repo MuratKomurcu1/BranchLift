@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { resolve } from "node:path";
-import { generateOverride, inspectCompose, volumeDirectoryName } from "../src/compose.js";
+import { generateOverride, inspectCompose, postgresDataVolumeNames, volumeDirectoryName } from "../src/compose.js";
 
 const fixture = (name: string) => resolve("fixtures", name);
 
@@ -10,6 +10,7 @@ test("inspects stateful services, named volumes, and ports", async () => {
 
   assert.deepEqual(inspection.inferredStatefulServices, ["postgres", "redis"]);
   assert.deepEqual(inspection.postgresServices, ["postgres"]);
+  assert.deepEqual(postgresDataVolumeNames(inspection), ["pgdata"]);
   assert.deepEqual(
     [...new Set(inspection.volumes.map((volume) => volume.source))].sort(),
     ["pgdata", "redisdata"],
@@ -23,14 +24,34 @@ test("inspects stateful services, named volumes, and ports", async () => {
 
 test("generates a Compose override with bind-mounted state and random ports", async () => {
   const inspection = await inspectCompose(fixture("compose.valid.yaml"));
-  const output = generateOverride(inspection, "/tmp/fork stack/volumes", { randomizePorts: true });
+  const output = generateOverride(inspection, "/tmp/fork stack/volumes", {
+    randomizePorts: true,
+    postgresHostUser: { uid: 501, gid: 20 },
+  });
 
   assert.match(output, /volumes: !override/);
   assert.match(output, /ports: !override/);
   assert.match(output, /source: "\/tmp\/fork stack\/volumes\/pgdata-[a-f0-9]{7}"/);
   assert.match(output, /target: "\/var\/lib\/postgresql\/data"/);
   assert.match(output, /PGDATA: "\/var\/lib\/postgresql\/data\/\.branchlift-pgdata"/);
+  assert.match(output, /user: "501:20"/);
+  assert.match(output, /- "\/var\/run\/postgresql:uid=501,gid=20,mode=3775"/);
   assert.doesNotMatch(output, /published:/);
+});
+
+test("can bootstrap PostgreSQL in an explicitly named Docker volume", async () => {
+  const inspection = await inspectCompose(fixture("compose.valid.yaml"));
+  const output = generateOverride(inspection, "/tmp/branchlift/bootstrap", {
+    randomizePorts: true,
+    nativeVolumes: new Map([["pgdata", "branchlift-postgres-bootstrap"]]),
+    postgresHostUser: false,
+  });
+
+  assert.match(output, /type: volume\n\s+source: "pgdata"/);
+  assert.match(output, /"pgdata":\n\s+name: "branchlift-postgres-bootstrap"/);
+  assert.match(output, /source: "\/tmp\/branchlift\/bootstrap\/redisdata-[a-f0-9]{7}"/);
+  assert.doesNotMatch(output, /user:/);
+  assert.doesNotMatch(output, /tmpfs:/);
 });
 
 test("reports isolation blockers instead of silently sharing state", async () => {

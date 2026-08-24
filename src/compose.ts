@@ -137,8 +137,16 @@ async function readMergedComposeDocument(files: string[]): Promise<unknown> {
 export function generateOverride(
   inspection: ComposeInspection,
   volumeRoot: string,
-  options: { randomizePorts: boolean },
+  options: {
+    randomizePorts: boolean;
+    postgresHostUser?: { uid: number; gid: number } | false;
+    nativeVolumes?: ReadonlyMap<string, string>;
+  },
 ): string {
+  const postgresHostUser = options.postgresHostUser === false
+    ? undefined
+    : options.postgresHostUser ?? localPostgresBindUser();
+  const nativeVolumes = options.nativeVolumes ?? new Map<string, string>();
   const byService = new Map<string, VolumeBinding[]>();
   for (const volume of inspection.volumes) {
     const existing = byService.get(volume.service) ?? [];
@@ -163,17 +171,27 @@ export function generateOverride(
     if (serviceVolumes.length > 0) {
       lines.push("    volumes: !override");
       for (const volume of serviceVolumes) {
-        lines.push("      - type: bind");
-        lines.push(`        source: ${quote(join(volumeRoot, volumeDirectoryName(volume.source)))}`);
+        const nativeVolume = nativeVolumes.get(volume.source);
+        lines.push(`      - type: ${nativeVolume === undefined ? "bind" : "volume"}`);
+        lines.push(
+          `        source: ${quote(nativeVolume === undefined ? join(volumeRoot, volumeDirectoryName(volume.source)) : volume.source)}`,
+        );
         lines.push(`        target: ${quote(volume.target)}`);
         if (volume.readOnly) lines.push("        read_only: true");
       }
     }
     if (inspection.postgresServices.includes(service) && serviceVolumes.length > 0) {
-      const dataVolume = serviceVolumes.find((volume) => volume.target.includes("postgres")) ?? serviceVolumes[0];
+      const dataVolume = selectPostgresDataVolume(serviceVolumes);
       if (dataVolume !== undefined) {
         lines.push("    environment:");
         lines.push(`      PGDATA: ${quote(`${dataVolume.target}/.branchlift-pgdata`)}`);
+      }
+      if (postgresHostUser !== undefined) {
+        lines.push(`    user: ${quote(`${postgresHostUser.uid}:${postgresHostUser.gid}`)}`);
+        lines.push("    tmpfs:");
+        lines.push(
+          `      - ${quote(`/var/run/postgresql:uid=${postgresHostUser.uid},gid=${postgresHostUser.gid},mode=3775`)}`,
+        );
       }
     }
     const servicePorts = portsByService.get(service) ?? [];
@@ -185,7 +203,34 @@ export function generateOverride(
       }
     }
   }
+  if (nativeVolumes.size > 0) {
+    lines.push("volumes:");
+    for (const [source, name] of [...nativeVolumes].sort(([left], [right]) => left.localeCompare(right))) {
+      lines.push(`  ${quote(source)}:`);
+      lines.push(`    name: ${quote(name)}`);
+    }
+  }
   return `${lines.join("\n")}\n`;
+}
+
+export function localPostgresBindUser(): { uid: number; gid: number } | undefined {
+  if (process.platform !== "darwin" || process.getuid === undefined || process.getgid === undefined) return undefined;
+  const uid = process.getuid();
+  const gid = process.getgid();
+  return uid > 0 ? { uid, gid } : undefined;
+}
+
+export function postgresDataVolumeNames(inspection: ComposeInspection): string[] {
+  return [...new Set(postgresDataVolumes(inspection).map((volume) => volume.source))].sort();
+}
+
+export function postgresDataVolumes(inspection: ComposeInspection): VolumeBinding[] {
+  const found: VolumeBinding[] = [];
+  for (const service of inspection.postgresServices) {
+    const dataVolume = selectPostgresDataVolume(inspection.volumes.filter((volume) => volume.service === service));
+    if (dataVolume !== undefined) found.push(dataVolume);
+  }
+  return found;
 }
 
 export function volumeDirectoryName(volume: string): string {
@@ -261,6 +306,10 @@ function isBindSource(source: string): boolean {
 
 function samePort(left: PortBinding, right: PortBinding): boolean {
   return left.service === right.service && left.target === right.target && left.protocol === right.protocol;
+}
+
+function selectPostgresDataVolume(volumes: VolumeBinding[]): VolumeBinding | undefined {
+  return volumes.find((volume) => volume.target.includes("postgres")) ?? volumes[0];
 }
 
 function isMap(value: unknown): value is UnknownMap {

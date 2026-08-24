@@ -27,7 +27,7 @@ BranchLift prepares one stopped, immutable golden snapshot and clones its state 
 
 ## Current status
 
-This repository is an early **v0.4**. PostgreSQL 16 and Redis 7 are covered by a real Docker end-to-end test that creates two environments, mutates one, proves the other is unchanged, rejects a concurrent lifecycle mutation, executes a context-aware child command, and recovers an abandoned snapshot build without discarding its diagnostic state.
+This repository is an early **v0.5**. PostgreSQL 16 and Redis 7 are covered by a real Docker end-to-end test that creates isolated environments, attaches state to an existing worktree, rejects unsafe worktree removal, blocks concurrent lifecycle mutation, executes a context-aware child command, and recovers an abandoned snapshot build without discarding diagnostic state.
 
 Supported today:
 
@@ -43,7 +43,8 @@ Supported today:
 - runtime audits and conservative orphan cleanup through `doctor --fix`;
 - cross-process snapshot and instance locks with stale-owner diagnosis;
 - context-aware host commands through `branchlift exec`;
-- crash recovery for abandoned snapshot builds and instance creation.
+- crash recovery for abandoned snapshot builds and instance creation;
+- attachment to worktrees already created by Codex, Claude, an IDE, or the user.
 
 MySQL, MongoDB, Kafka, MinIO, Windows, Podman, and live production imports are not yet claimed as production-ready.
 
@@ -83,6 +84,14 @@ branchlift spawn agent/fix-auth -- codex
 branchlift spawn agent/billing -- claude
 branchlift list
 ```
+
+If a tool has already created and checked out a worktree, run this from that worktree instead:
+
+```bash
+branchlift attach -- codex
+```
+
+Attached worktrees are recorded as externally owned. BranchLift manages their backend state but never removes the worktree itself.
 
 Run tests, migrations, or another tool inside an existing instance's worktree and environment:
 
@@ -166,6 +175,7 @@ branchlift snapshot [create] [NAME]
 branchlift snapshot list [--json]
 branchlift snapshot delete NAME
 branchlift spawn BRANCH [--snapshot NAME] [--no-start] [-- AGENT ...]
+branchlift attach [--snapshot NAME] [--no-start] [-- AGENT ...]
 branchlift start BRANCH [-- AGENT ...]
 branchlift stop BRANCH
 branchlift exec BRANCH -- COMMAND ...
@@ -205,6 +215,8 @@ Writable bind mounts are reported as warnings because they may share state acros
 
 Mutating commands acquire owner-stamped filesystem locks. A conflicting command fails instead of racing database copies or Compose teardown. Agent and `exec` child processes run outside lifecycle locks so long-running tools do not prevent intentional runtime control.
 
+Instances created by `spawn` own their generated worktree. Instances created by `attach` mark the current worktree as external. `destroy --worktree` refuses external ownership before stopping or removing anything; plain `destroy` removes only BranchLift runtime state.
+
 BranchLift is environment isolation, **not a security sandbox**. Agents and containers still have whatever host, filesystem, credential, and network access the user gives them. See [SECURITY.md](SECURITY.md).
 
 ## Storage behavior
@@ -214,7 +226,7 @@ Runtime state lives outside the repository:
 ```text
 ~/.branchlift/
 ├── repos/<repo-id>/snapshots/<name>/volumes/
-├── repos/<repo-id>/instances/<branch>/volumes/
+├── repos/<repo-id>/instances/<branch>/volumes[-<generation>]/
 ├── repos/<repo-id>/locks/
 └── worktrees/<repo-id>/<branch>/
 ```
@@ -226,6 +238,8 @@ Copy strategy order:
 1. macOS APFS clonefile (`cp -c`);
 2. Linux reflink (`cp --reflink=always`);
 3. safe recursive copy fallback.
+
+Each reset clones into a never-before-mounted volume generation and switches the generated Compose override only after the clone validates. The previous generation is removed after the replacement stack becomes healthy. This avoids Docker Desktop bind-cache races and never exposes a half-copied reset as the active path.
 
 Measure the actual behavior on your machine:
 

@@ -8,9 +8,10 @@ import { initializeConfig, inspectConfiguredCompose, loadConfig } from "./config
 import { assertDockerReady } from "./docker.js";
 import { applyDoctorFixes, auditState, inspectDockerProjects } from "./doctor.js";
 import { BranchLiftError } from "./errors.js";
-import { discoverRepo } from "./git.js";
+import { currentBranch, discoverRepo } from "./git.js";
 import { humanBytes, safeSlug } from "./paths.js";
 import {
+  attachInstance,
   destroyInstance,
   execInInstance,
   resetInstance,
@@ -22,7 +23,7 @@ import { createSnapshot } from "./snapshot.js";
 import { deleteSnapshot, listInstances, listSnapshots } from "./state.js";
 import type { ComposeInspection, InstanceMetadata } from "./types.js";
 
-const version = "0.4.0";
+const version = "0.5.0";
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const args = [...argv];
@@ -109,6 +110,27 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const inspection = await inspectConfiguredCompose(repo, config);
         if (!json) console.log(`Forking ${snapshotOption ?? config.snapshot.default} into ${branch}...`);
         const instance = await spawnInstance(repo, config, inspection, branch, {
+          snapshot: snapshotOption ?? config.snapshot.default,
+          start: !noStart,
+          agentCommand,
+        });
+        if (json) console.log(JSON.stringify(instance, null, 2));
+        else printInstance(instance);
+        return 0;
+      }
+      case "attach": {
+        const separator = args.indexOf("--");
+        const agentCommand = separator >= 0 ? args.splice(separator + 1) : [];
+        if (separator >= 0) args.splice(separator, 1);
+        const snapshotOption = takeOption(args, "--snapshot");
+        const noStart = takeFlag(args, "--no-start");
+        const json = takeFlag(args, "--json");
+        assertNoArgs(args);
+        const config = await loadConfig(repo);
+        const inspection = await inspectConfiguredCompose(repo, config);
+        const branch = await currentBranch(repo);
+        if (!json) console.log(`Attaching ${snapshotOption ?? config.snapshot.default} to ${branch}...`);
+        const instance = await attachInstance(repo, config, inspection, branch, {
           snapshot: snapshotOption ?? config.snapshot.default,
           start: !noStart,
           agentCommand,
@@ -253,6 +275,7 @@ function printInspection(inspection: ComposeInspection): void {
 function printInstance(instance: InstanceMetadata): void {
   console.log(`Instance ${instance.branch}: ${instance.status}`);
   console.log(`Worktree: ${instance.worktreePath}`);
+  console.log(`Worktree owner: ${instance.worktreeOwner ?? "branchlift"}`);
   console.log(`Snapshot: ${instance.snapshot}`);
   console.log(`State copy: ${instance.copyStrategy}`);
   if (instance.ports.length === 0) {
@@ -269,10 +292,12 @@ function printInstances(instances: InstanceMetadata[]): void {
     console.log("No BranchLift instances for this repository.");
     return;
   }
-  console.log("STATUS\tBRANCH\tSNAPSHOT\tPORTS\tWORKTREE");
+  console.log("STATUS\tOWNER\tBRANCH\tSNAPSHOT\tPORTS\tWORKTREE");
   for (const instance of instances) {
     const ports = instance.ports.map((port) => `${port.service}:${port.port}`).join(",") || "-";
-    console.log(`${instance.status}\t${instance.branch}\t${instance.snapshot}\t${ports}\t${instance.worktreePath}`);
+    console.log(
+      `${instance.status}\t${instance.worktreeOwner ?? "branchlift"}\t${instance.branch}\t${instance.snapshot}\t${ports}\t${instance.worktreePath}`,
+    );
   }
 }
 
@@ -372,6 +397,7 @@ Usage:
   branchlift snapshot list [--json]
   branchlift snapshot delete NAME
   branchlift spawn BRANCH [--snapshot NAME] [--no-start] [-- AGENT ...]
+  branchlift attach [--snapshot NAME] [--no-start] [-- AGENT ...]
   branchlift start BRANCH [-- AGENT ...]
   branchlift stop BRANCH
   branchlift exec BRANCH -- COMMAND ...
@@ -385,6 +411,7 @@ Examples:
   branchlift snapshot dev
   branchlift spawn fix-auth -- codex
   branchlift spawn billing -- claude
+  branchlift attach -- codex
   branchlift reset fix-auth
   branchlift exec fix-auth -- npm test
 

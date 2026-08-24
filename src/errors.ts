@@ -22,3 +22,10 @@ export class CommandError extends BranchLiftError {
     this.stderr = stderr;
   }
 }
+
+export function errorDetail(error: unknown): string {
+  if (error instanceof BranchLiftError) {
+    return error.hint ? `${error.message}\n${error.hint}` : error.message;
+  }
+  return error instanceof Error ? error.message : String(error);
+}

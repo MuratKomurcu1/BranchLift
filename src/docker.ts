@@ -50,6 +50,36 @@ export async function composeDown(runtime: ComposeRuntime): Promise<void> {
   });
 }
 
+export async function composeStop(runtime: ComposeRuntime): Promise<void> {
+  await runCommand("docker", [...composeArgs(runtime), "stop"], {
+    cwd: runtime.cwd,
+    stdio: "inherit",
+  });
+}
+
+export async function copyServicePathToHost(
+  runtime: ComposeRuntime,
+  service: string,
+  sourcePath: string,
+  destination: string,
+): Promise<void> {
+  const container = await runCommand("docker", [...composeArgs(runtime), "ps", "--all", "--quiet", service], {
+    cwd: runtime.cwd,
+  });
+  const id = container.stdout.trim().split("\n").find(Boolean);
+  if (id === undefined) throw new BranchLiftError(`Cannot find the stopped ${service} container for snapshot export.`);
+  await runCommand("docker", ["cp", `${id}:${sourcePath.replace(/\/$/, "")}/.`, destination], {
+    cwd: runtime.cwd,
+    stdio: "inherit",
+  });
+}
+
+export async function removeDockerVolumes(names: Iterable<string>, allowFailure = false): Promise<void> {
+  for (const name of names) {
+    await runCommand("docker", ["volume", "rm", name], { allowFailure });
+  }
+}
+
 export async function composeDownBestEffort(runtime: ComposeRuntime): Promise<void> {
   await runCommand("docker", [...composeArgs(runtime), "down", "--remove-orphans"], {
     cwd: runtime.cwd,

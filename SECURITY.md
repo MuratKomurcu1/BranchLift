@@ -32,6 +32,7 @@ Do not treat worktree isolation as a security boundary.
 - `doctor --fix` removes only exact BranchLift-labeled Docker resources and verified same-host stale locks.
 - Abandoned snapshot recovery preserves volume contents in a `.failed-recovered-*` diagnostic directory.
 - Git worktrees are preserved unless `--worktree` is explicit.
+- Worktrees registered through `attach` are externally owned and cannot be removed by BranchLift even with `--worktree`.
 - A dirty worktree is never removed.
 - Git branches are never deleted.
 

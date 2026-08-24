@@ -59,6 +59,7 @@ test("doctor reports missing snapshot and runtime files without mutating them", 
     assert.ok(codes.has("instance-snapshot-missing"));
     assert.ok(codes.has("instance-worktree-missing"));
     assert.ok(codes.has("instance-override-missing"));
+    assert.ok(codes.has("instance-volumes-missing"));
     assert.ok(codes.has("instance-compose-missing"));
     assert.ok(codes.has("state-metadata-invalid"));
     assert.ok(codes.has("stale-lock"));
@@ -135,6 +136,8 @@ async function createHealthyState(repo: RepoInfo, status: InstanceMetadata["stat
   await writeFile(join(metadata.worktreePath, metadata.composeFile), "services: {}\n");
   await mkdir(instanceRoot(repo, metadata.slug), { recursive: true });
   await writeFile(metadata.overrideFile, "services: {}\n");
+  assert.ok(metadata.volumeRoot);
+  await mkdir(metadata.volumeRoot, { recursive: true });
   await writeInstanceMetadata(repo, metadata.slug, metadata);
   return metadata;
 }
@@ -177,6 +180,7 @@ function instance(
     snapshot,
     composeFile: "compose.yaml",
     overrideFile: join(instanceRoot(repo, slug), "compose.override.yaml"),
+    volumeRoot: join(instanceRoot(repo, slug), "volumes"),
     composeProject: `bl-${repo.key.slice(-12)}-instance-${slug}`,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",

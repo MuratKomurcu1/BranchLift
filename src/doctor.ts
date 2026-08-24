@@ -38,6 +38,7 @@ export interface DoctorFinding {
     | "instance-snapshot-missing"
     | "instance-worktree-missing"
     | "instance-override-missing"
+    | "instance-volumes-missing"
     | "instance-compose-missing"
     | "state-metadata-invalid"
     | "abandoned-instance-creation"
@@ -288,11 +289,18 @@ export async function applyDoctorFixes(repo: RepoInfo, report: DoctorReport): Pr
 async function auditInstanceFiles(instance: InstanceMetadata, findings: DoctorFinding[]): Promise<void> {
   const checks: Array<{
     path: string;
-    code: "instance-worktree-missing" | "instance-override-missing" | "instance-compose-missing";
+    code:
+      | "instance-worktree-missing"
+      | "instance-override-missing"
+      | "instance-volumes-missing"
+      | "instance-compose-missing";
     label: string;
   }> = [
     { path: instance.worktreePath, code: "instance-worktree-missing", label: "worktree" },
     { path: instance.overrideFile, code: "instance-override-missing", label: "generated Compose override" },
+    ...(instance.volumeRoot === undefined
+      ? []
+      : [{ path: instance.volumeRoot, code: "instance-volumes-missing" as const, label: "active volume generation" }]),
     ...(instance.composeFiles ?? [instance.composeFile]).map((file) => ({
       path: resolve(instance.worktreePath, file),
       code: "instance-compose-missing" as const,

@@ -29,7 +29,7 @@ The inspector parses a single Compose file directly. For multiple files it asks 
 
 Source Compose files are never rewritten. BranchLift generates an additional final override using Compose's `!override` tag. Named volumes become host-managed bind mounts and published ports omit a fixed host port so Docker assigns collision-free ports.
 
-PostgreSQL receives a nested `PGDATA` directory. This avoids Docker Desktop's inability to change ownership of the bind-mount root while preserving a cloneable host directory.
+PostgreSQL receives a nested `PGDATA` directory. On macOS, initial snapshot bootstrap runs in a temporary Docker-native volume and exports the cleanly stopped data as host-owned files; cloned instances then use the invoking host UID/GID for the container and socket tmpfs. This avoids Docker Desktop bind ownership races while preserving APFS cloning for normal spawn and reset operations. Other platforms bootstrap directly in the host-managed snapshot path and keep the image's declared user.
 
 ## Snapshot consistency
 
@@ -45,7 +45,11 @@ Filesystem cloning is never performed from a running database.
 
 ## Instance creation
 
-BranchLift creates the Git worktree, clones every snapshot volume, writes an override, validates the merged Compose model, starts it, and discovers actual published ports. Metadata and agent context are written outside the worktree.
+`spawn` creates a Git worktree while `attach` adopts the current registered Git worktree. Both paths clone every snapshot volume, write an override, validate the merged Compose model, start it, and discover actual published ports. Metadata and agent context are written outside the worktree.
+
+Instance metadata records worktree ownership. BranchLift-generated worktrees are `branchlift`; attached worktrees are `external`. Legacy metadata defaults to BranchLift ownership because attachment did not exist in earlier releases. External ownership is checked before any `destroy --worktree` teardown, preventing a partially destructive refusal.
+
+Reset uses volume generations instead of deleting and repopulating an already-mounted bind source. A complete clone and a new override are validated under unique paths, metadata adopts that generation, and the previous generation is removed only after the replacement is healthy. This prevents partial resets and stale bind-path caches from reaching the database process.
 
 ## Concurrency control
 
