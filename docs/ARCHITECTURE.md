@@ -3,7 +3,7 @@
 ## Lifecycle
 
 ```text
-compose.yaml
+compose.yaml + optional overrides
     │ inspect + validate
     ▼
 golden snapshot ── filesystem clone ──► branch instance
@@ -18,7 +18,7 @@ reset source for every instance
 
 ## Compose inspection
 
-The inspector parses the project Compose file and records:
+The inspector parses a single Compose file directly. For multiple files it asks Docker Compose for the merged project model in the configured order, then records:
 
 - services and image hints;
 - named volumes and their container targets;
@@ -27,7 +27,7 @@ The inspector parses the project Compose file and records:
 - stateful services inferred from names and images;
 - isolation blockers and warnings.
 
-The source Compose file is never rewritten. BranchLift generates an additional override using Compose's `!override` tag. Named volumes become host-managed bind mounts and published ports omit a fixed host port so Docker assigns collision-free ports.
+Source Compose files are never rewritten. BranchLift generates an additional final override using Compose's `!override` tag. Named volumes become host-managed bind mounts and published ports omit a fixed host port so Docker assigns collision-free ports.
 
 PostgreSQL receives a nested `PGDATA` directory. This avoids Docker Desktop's inability to change ownership of the bind-mount root while preserving a cloneable host directory.
 
@@ -60,3 +60,5 @@ The fallback remains correct but loses the speed and disk-efficiency advantage. 
 ## Crash behavior
 
 Metadata moves through `creating`, `running`, `stopped`, and `failed` states. Failed snapshots are moved to a diagnostic directory rather than becoming valid immutable snapshots. Failed instances retain metadata so users can inspect and destroy them.
+
+`branchlift doctor` reconciles metadata with managed files and Docker labels. Cleanup rechecks project ownership immediately before removing exact labeled containers, networks, or volumes. Diagnostic snapshot directories and user worktrees are reported but never automatically deleted.

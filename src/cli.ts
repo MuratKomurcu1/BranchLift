@@ -6,6 +6,7 @@ import { relative } from "node:path";
 import { benchmarkSnapshot } from "./benchmark.js";
 import { initializeConfig, inspectConfiguredCompose, loadConfig } from "./config.js";
 import { assertDockerReady } from "./docker.js";
+import { applyDoctorFixes, auditState, inspectDockerProjects } from "./doctor.js";
 import { BranchLiftError } from "./errors.js";
 import { discoverRepo } from "./git.js";
 import { humanBytes, safeSlug } from "./paths.js";
@@ -17,10 +18,10 @@ import {
   stopInstance,
 } from "./runtime.js";
 import { createSnapshot } from "./snapshot.js";
-import { listInstances } from "./state.js";
+import { deleteSnapshot, listInstances, listSnapshots } from "./state.js";
 import type { ComposeInspection, InstanceMetadata } from "./types.js";
 
-const version = "0.1.0";
+const version = "0.2.0";
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const args = [...argv];
@@ -38,9 +39,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const repo = await discoverRepo();
     switch (command) {
       case "init": {
-        const compose = takeOption(args, "--compose");
+        const composeFiles = takeOptions(args, "--compose");
         assertNoArgs(args);
-        const result = await initializeConfig(repo, compose);
+        const result = await initializeConfig(repo, composeFiles.length > 0 ? composeFiles : undefined);
         console.log(`Created ${relative(repo.root, result.path)}.`);
         printInspection(result.inspection);
         if (result.inspection.blockers.length > 0) {
@@ -60,6 +61,25 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         return inspection.blockers.length === 0 ? 0 : 2;
       }
       case "snapshot": {
+        const action = args[0];
+        if (action === "list") {
+          args.shift();
+          const json = takeFlag(args, "--json");
+          assertNoArgs(args);
+          const snapshots = await listSnapshots(repo);
+          if (json) console.log(JSON.stringify(snapshots, null, 2));
+          else printSnapshots(snapshots);
+          return 0;
+        }
+        if (action === "delete") {
+          args.shift();
+          const name = requirePositional(args, "snapshot name");
+          assertNoArgs(args);
+          await deleteSnapshot(repo, name);
+          console.log(`Deleted immutable snapshot ${name}.`);
+          return 0;
+        }
+        if (action === "create") args.shift();
         const json = takeFlag(args, "--json");
         const config = await loadConfig(repo);
         const inspection = await inspectConfiguredCompose(repo, config);
@@ -145,6 +165,8 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         return 0;
       }
       case "doctor": {
+        const fix = takeFlag(args, "--fix");
+        const json = takeFlag(args, "--json");
         assertNoArgs(args);
         const config = await loadConfig(repo);
         const inspection = await inspectConfiguredCompose(repo, config);
@@ -154,12 +176,20 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         } catch {
           dockerReady = false;
         }
-        console.log(`Git repository: ok (${repo.root})`);
-        console.log(`Compose analysis: ${inspection.blockers.length === 0 ? "ok" : `${inspection.blockers.length} blocker(s)`}`);
-        console.log(`Docker daemon: ${dockerReady ? "ok" : "unavailable"}`);
-        if (inspection.warnings.length > 0) inspection.warnings.forEach((warning) => console.log(`warning: ${warning}`));
-        if (inspection.blockers.length > 0) inspection.blockers.forEach((blocker) => console.log(`blocker: ${blocker}`));
-        return dockerReady && inspection.blockers.length === 0 ? 0 : 2;
+        const dockerProjects = dockerReady ? await inspectDockerProjects() : undefined;
+        let report = await auditState(repo, dockerProjects);
+        const fixes = fix ? await applyDoctorFixes(repo, report) : [];
+        if (fix && fixes.length > 0) {
+          report = await auditState(repo, dockerReady ? await inspectDockerProjects() : undefined);
+        }
+        if (json) {
+          console.log(JSON.stringify({ dockerReady, inspection, report, fixes }, null, 2));
+        } else {
+          printDoctor(repo.root, dockerReady, inspection, report, fixes);
+        }
+        return dockerReady && inspection.blockers.length === 0 && !report.findings.some(({ severity }) => severity === "error")
+          ? 0
+          : 2;
       }
       case "benchmark": {
         const json = takeFlag(args, "--json");
@@ -191,7 +221,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 }
 
 function printInspection(inspection: ComposeInspection): void {
-  console.log(`Compose: ${inspection.file}`);
+  console.log(`Compose: ${inspection.files.join(", ")}`);
   console.log(`Services: ${inspection.services.join(", ")}`);
   console.log(
     `Stateful: ${inspection.inferredStatefulServices.length > 0 ? inspection.inferredStatefulServices.join(", ") : "none"}`,
@@ -235,6 +265,43 @@ function printInstances(instances: InstanceMetadata[]): void {
   }
 }
 
+function printSnapshots(snapshots: Awaited<ReturnType<typeof listSnapshots>>): void {
+  if (snapshots.length === 0) {
+    console.log("No BranchLift snapshots for this repository.");
+    return;
+  }
+  console.log("STATUS\tNAME\tLOGICAL SIZE\tCREATED");
+  for (const snapshot of snapshots) {
+    console.log(
+      `${snapshot.status}\t${snapshot.name}\t${humanBytes(snapshot.sizeBytes ?? 0)}\t${snapshot.createdAt}`,
+    );
+  }
+}
+
+function printDoctor(
+  root: string,
+  dockerReady: boolean,
+  inspection: ComposeInspection,
+  report: Awaited<ReturnType<typeof auditState>>,
+  fixes: string[],
+): void {
+  console.log(`Git repository: ok (${root})`);
+  console.log(`Compose analysis: ${inspection.blockers.length === 0 ? "ok" : `${inspection.blockers.length} blocker(s)`}`);
+  console.log(`Docker daemon: ${dockerReady ? "ok" : "unavailable"}`);
+  console.log(`BranchLift state: ${report.snapshots} snapshot(s), ${report.instances} instance(s)`);
+  inspection.warnings.forEach((warning) => console.log(`warning: ${warning}`));
+  inspection.blockers.forEach((blocker) => console.log(`blocker: ${blocker}`));
+  report.findings.forEach((finding) => {
+    console.log(`${finding.severity}: [${finding.code}] ${finding.message}${finding.fixable ? " (fixable)" : ""}`);
+  });
+  fixes.forEach((fix) => console.log(`fixed: ${fix}`));
+  if (report.findings.length === 0 && inspection.blockers.length === 0 && dockerReady) {
+    console.log("Runtime audit: clean");
+  } else if (report.findings.some(({ fixable }) => fixable)) {
+    console.log("Run branchlift doctor --fix to apply safe repairs.");
+  }
+}
+
 function printError(error: unknown): void {
   if (error instanceof BranchLiftError) {
     console.error(`error: ${error.message}`);
@@ -271,6 +338,13 @@ function takeOption(args: string[], name: string): string | undefined {
   return value;
 }
 
+function takeOptions(args: string[], name: string): string[] {
+  const values: string[] = [];
+  let value: string | undefined;
+  while ((value = takeOption(args, name)) !== undefined) values.push(value);
+  return values;
+}
+
 function assertNoArgs(args: string[]): void {
   if (args.length > 0) throw new BranchLiftError(`Unexpected argument: ${args[0]}`);
 }
@@ -279,16 +353,18 @@ function printHelp(): void {
   console.log(`BranchLift ${version} — stateful backend environments for parallel coding agents
 
 Usage:
-  branchlift init [--compose FILE]
+  branchlift init [--compose FILE]...
   branchlift inspect [--json]
-  branchlift snapshot [NAME]
+  branchlift snapshot [create] [NAME]
+  branchlift snapshot list [--json]
+  branchlift snapshot delete NAME
   branchlift spawn BRANCH [--snapshot NAME] [--no-start] [-- AGENT ...]
   branchlift start BRANCH [-- AGENT ...]
   branchlift stop BRANCH
   branchlift reset BRANCH [--no-start]
   branchlift list [--json]
   branchlift destroy BRANCH [--worktree]
-  branchlift doctor
+  branchlift doctor [--fix] [--json]
   branchlift benchmark [SNAPSHOT] [--iterations N]
 
 Examples:

@@ -10,18 +10,21 @@ export const configFileName = "branchlift.yaml";
 
 export async function initializeConfig(
   repo: RepoInfo,
-  requestedCompose?: string,
+  requestedCompose?: string | string[],
 ): Promise<{ config: BranchLiftConfig; inspection: ComposeInspection; path: string }> {
   const path = join(repo.root, configFileName);
   if (await pathExists(path)) {
     throw new BranchLiftError(`${configFileName} already exists.`, "Edit the existing file or run branchlift inspect.");
   }
-  const composeFile = await findComposeFile(repo.root, requestedCompose);
-  const inspection = await inspectCompose(composeFile);
+  const requested = requestedCompose === undefined ? undefined : Array.isArray(requestedCompose) ? requestedCompose : [requestedCompose];
+  const composeFiles = requested === undefined
+    ? [await findComposeFile(repo.root)]
+    : await Promise.all(requested.map(async (file) => await findComposeFile(repo.root, file)));
+  const inspection = await inspectCompose(composeFiles);
   const config: BranchLiftConfig = {
     version: 1,
     compose: {
-      file: relativeComposePath(repo.root, composeFile),
+      files: composeFiles.map((file) => relativeComposePath(repo.root, file)),
       statefulServices: inspection.inferredStatefulServices,
     },
     snapshot: {
@@ -49,7 +52,10 @@ export async function loadConfig(repo: RepoInfo): Promise<BranchLiftConfig> {
   const compose = requireMap(raw.compose, "compose");
   const snapshot = requireMap(raw.snapshot, "snapshot");
   const worktree = requireMap(raw.worktree, "worktree");
-  const file = requireString(compose.file, "compose.file");
+  const files = compose.files === undefined
+    ? [requireString(compose.file, "compose.file")]
+    : stringArray(compose.files, "compose.files");
+  if (files.length === 0) throw new BranchLiftError("compose.files must contain at least one file.");
   const statefulServices = stringArray(compose.statefulServices, "compose.statefulServices");
   const defaultSnapshot = requireString(snapshot.default, "snapshot.default");
   const healthTimeoutSeconds = requirePositiveInteger(snapshot.healthTimeoutSeconds, "snapshot.healthTimeoutSeconds");
@@ -58,7 +64,7 @@ export async function loadConfig(repo: RepoInfo): Promise<BranchLiftConfig> {
 
   return {
     version: 1,
-    compose: { file, statefulServices },
+    compose: { files: [...new Set(files)], statefulServices },
     snapshot: { default: defaultSnapshot, healthTimeoutSeconds, seed },
     worktree: { copyFiles },
   };
@@ -68,10 +74,14 @@ export async function inspectConfiguredCompose(
   repo: RepoInfo,
   config: BranchLiftConfig,
 ): Promise<ComposeInspection> {
-  const file = resolve(repo.root, config.compose.file);
-  relativeComposePath(repo.root, file);
-  if (!(await pathExists(file))) throw new BranchLiftError(`Configured Compose file not found: ${config.compose.file}`);
-  const inspection = await inspectCompose(file);
+  const files = config.compose.files.map((file) => resolve(repo.root, file));
+  for (const [index, file] of files.entries()) {
+    relativeComposePath(repo.root, file);
+    if (!(await pathExists(file))) {
+      throw new BranchLiftError(`Configured Compose file not found: ${config.compose.files[index]}`);
+    }
+  }
+  const inspection = await inspectCompose(files);
   for (const service of config.compose.statefulServices) {
     if (!inspection.services.includes(service)) {
       inspection.blockers.push(`Configured stateful service does not exist: ${service}`);

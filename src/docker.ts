@@ -4,7 +4,7 @@ import type { ComposeInspection, PublishedPort } from "./types.js";
 
 export interface ComposeRuntime {
   cwd: string;
-  composeFile: string;
+  composeFiles: string[];
   overrideFile: string;
   project: string;
 }
@@ -93,15 +93,10 @@ export async function publishedPorts(
 }
 
 export function composeArgs(runtime: ComposeRuntime): string[] {
-  return [
-    "compose",
-    "-f",
-    runtime.composeFile,
-    "-f",
-    runtime.overrideFile,
-    "-p",
-    runtime.project,
-  ];
+  const args = ["compose"];
+  for (const file of runtime.composeFiles) args.push("-f", file);
+  args.push("-f", runtime.overrideFile, "-p", runtime.project);
+  return args;
 }
 
 function parseAddress(value: string): { host: string; port: number } | undefined {

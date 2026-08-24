@@ -3,6 +3,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse } from "yaml";
 import { BranchLiftError } from "./errors.js";
 import { pathExists, safeSlug } from "./paths.js";
+import { runCommand } from "./process.js";
 import type { BindMount, ComposeInspection, PortBinding, VolumeBinding } from "./types.js";
 
 type UnknownMap = Record<string, unknown>;
@@ -26,13 +27,14 @@ export async function findComposeFile(root: string, requested?: string): Promise
   );
 }
 
-export async function inspectCompose(file: string): Promise<ComposeInspection> {
-  const raw = await readFile(file, "utf8");
-  const document = parse(raw) as unknown;
-  if (!isMap(document)) throw new BranchLiftError(`Invalid Compose document: ${file}`);
+export async function inspectCompose(input: string | string[]): Promise<ComposeInspection> {
+  const files = (Array.isArray(input) ? input : [input]).map((file) => resolve(file));
+  if (files.length === 0) throw new BranchLiftError("At least one Compose file is required.");
+  const document = files.length === 1 ? await readComposeDocument(files[0]!) : await readMergedComposeDocument(files);
+  if (!isMap(document)) throw new BranchLiftError(`Invalid Compose document: ${files.join(", ")}`);
   const serviceMap = isMap(document.services) ? document.services : undefined;
   if (serviceMap === undefined || Object.keys(serviceMap).length === 0) {
-    throw new BranchLiftError(`Compose file has no services: ${file}`);
+    throw new BranchLiftError(`Compose project has no services: ${files.join(", ")}`);
   }
 
   const topVolumes = isMap(document.volumes) ? document.volumes : {};
@@ -103,7 +105,8 @@ export async function inspectCompose(file: string): Promise<ComposeInspection> {
   }
 
   return {
-    file: resolve(file),
+    file: files.join(", "),
+    files,
     services,
     inferredStatefulServices: inferredStatefulServices.sort(),
     postgresServices: postgresServices.sort(),
@@ -113,6 +116,22 @@ export async function inspectCompose(file: string): Promise<ComposeInspection> {
     blockers: unique(blockers),
     warnings: unique(warnings),
   };
+}
+
+async function readComposeDocument(file: string): Promise<unknown> {
+  return parse(await readFile(file, "utf8")) as unknown;
+}
+
+async function readMergedComposeDocument(files: string[]): Promise<unknown> {
+  const args = ["compose"];
+  for (const file of files) args.push("-f", file);
+  args.push("config", "--format", "json");
+  const result = await runCommand("docker", args, { cwd: resolve(files[0]!, "..") });
+  try {
+    return JSON.parse(result.stdout) as unknown;
+  } catch {
+    throw new BranchLiftError("Docker Compose returned an invalid merged project model.", result.stderr.trim());
+  }
 }
 
 export function generateOverride(

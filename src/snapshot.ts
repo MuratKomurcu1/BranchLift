@@ -45,15 +45,18 @@ export async function createSnapshot(
 
   const overrideFile = join(staging, "snapshot.override.yaml");
   await writeFile(overrideFile, generateOverride(inspection, volumeRoot, { randomizePorts: true }));
-  const composeFile = resolve(repo.root, config.compose.file);
+  const composeFiles = config.compose.files.map((file) => resolve(repo.root, file));
+  const primaryComposeFile = config.compose.files[0];
+  if (primaryComposeFile === undefined) throw new BranchLiftError("At least one Compose file is required.");
   const project = projectName(repo, `snapshot-${name}`);
-  const runtime = { cwd: repo.root, composeFile, overrideFile, project };
+  const runtime = { cwd: repo.root, composeFiles, overrideFile, project };
   const metadata: SnapshotMetadata = {
     version: 1,
     name,
     repoKey: repo.key,
     sourceRoot: repo.root,
-    composeFile: config.compose.file,
+    composeFile: primaryComposeFile,
+    composeFiles: config.compose.files,
     composeProject: project,
     createdAt: new Date().toISOString(),
     status: "building",

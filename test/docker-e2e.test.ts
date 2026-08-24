@@ -13,9 +13,11 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
   const stateHome = await mkdtemp(join(tmpdir(), "branchlift-e2e-state-"));
   const cli = resolve("dist/src/cli.js");
   const env = { ...process.env, BRANCHLIFT_HOME: stateHome };
+  let orphanNetwork: string | undefined;
 
   try {
     await writeFile(join(root, "compose.yaml"), composeFixture());
+    await writeFile(join(root, "compose.dev.yaml"), composeDevFixture());
     await writeFile(join(root, "branchlift.yaml"), configFixture());
     await run("git", ["init", "-b", "main"], root, env);
     await run("git", ["config", "user.email", "branchlift-test@example.invalid"], root, env);
@@ -24,6 +26,10 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     await run("git", ["commit", "-m", "fixture"], root, env);
 
     await run(process.execPath, [cli, "snapshot", "dev"], root, env);
+    const snapshots = JSON.parse(
+      await run(process.execPath, [cli, "snapshot", "list", "--json"], root, env),
+    ) as Array<{ name: string; status: string }>;
+    assert.deepEqual(snapshots.map(({ name, status }) => ({ name, status })), [{ name: "dev", status: "ready" }]);
     const first = JSON.parse(await run(process.execPath, [cli, "spawn", "agent-a", "--json"], root, env)) as InstanceMetadata;
     assert.equal(await probe(first, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
 
@@ -33,6 +39,26 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     const second = JSON.parse(await run(process.execPath, [cli, "spawn", "agent-b", "--json"], root, env)) as InstanceMetadata;
     assert.equal(await probe(second, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
     assert.notEqual(first.ports.find((port) => port.service === "postgres")?.port, second.ports.find((port) => port.service === "postgres")?.port);
+
+    const deleteUsedSnapshot = await runCommand(process.execPath, [cli, "snapshot", "delete", "dev"], {
+      cwd: root,
+      env,
+      allowFailure: true,
+    });
+    assert.equal(deleteUsedSnapshot.exitCode, 1);
+    assert.match(deleteUsedSnapshot.stderr, /still used by 2 instance/);
+
+    const projectPrefix = first.composeProject.slice(0, first.composeProject.indexOf("instance-"));
+    const orphanProject = `${projectPrefix}orphan-e2e`;
+    orphanNetwork = `${orphanProject}-network`;
+    await run("docker", ["network", "create", "--label", `com.docker.compose.project=${orphanProject}`, orphanNetwork], root, env);
+    const doctor = JSON.parse(
+      await run(process.execPath, [cli, "doctor", "--fix", "--json"], root, env),
+    ) as { fixes: string[]; report: { findings: Array<{ code: string }> } };
+    assert.ok(doctor.fixes.some((message) => message.includes(orphanProject)));
+    assert.ok(!doctor.report.findings.some(({ code }) => code === "orphan-runtime"));
+    const orphanAfterFix = await runCommand("docker", ["network", "inspect", orphanNetwork], { allowFailure: true });
+    assert.notEqual(orphanAfterFix.exitCode, 0);
 
     const failedAgent = await runCommand(
       process.execPath,
@@ -54,6 +80,9 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     await run(process.execPath, [cli, "destroy", "agent-a", "--worktree"], root, env);
     await run(process.execPath, [cli, "destroy", "agent-b", "--worktree"], root, env);
   } finally {
+    if (orphanNetwork !== undefined) {
+      await runCommand("docker", ["network", "rm", orphanNetwork], { allowFailure: true });
+    }
     const listed = await runCommand(process.execPath, [cli, "list", "--json"], { cwd: root, env, allowFailure: true });
     if (listed.exitCode === 0) {
       try {
@@ -79,12 +108,12 @@ async function probe(instance: InstanceMetadata, query: string): Promise<string>
 }
 
 async function sql(instance: InstanceMetadata, query: string): Promise<string> {
+  const composeFiles = (instance.composeFiles ?? [instance.composeFile]).flatMap((file) => ["-f", join(instance.worktreePath, file)]);
   const result = await runCommand(
     "docker",
     [
       "compose",
-      "-f",
-      join(instance.worktreePath, instance.composeFile),
+      ...composeFiles,
       "-f",
       instance.overrideFile,
       "-p",
@@ -119,8 +148,6 @@ function composeFixture(): string {
       interval: 1s
       timeout: 2s
       retries: 40
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
   redis:
@@ -130,8 +157,6 @@ function composeFixture(): string {
       interval: 1s
       timeout: 2s
       retries: 40
-    ports:
-      - "6379:6379"
     volumes:
       - redisdata:/data
 volumes:
@@ -140,10 +165,23 @@ volumes:
 `;
 }
 
+function composeDevFixture(): string {
+  return `services:
+  postgres:
+    ports:
+      - "5432:5432"
+  redis:
+    ports:
+      - "6379:6379"
+`;
+}
+
 function configFixture(): string {
   return `version: 1
 compose:
-  file: compose.yaml
+  files:
+    - compose.yaml
+    - compose.dev.yaml
   statefulServices:
     - postgres
     - redis

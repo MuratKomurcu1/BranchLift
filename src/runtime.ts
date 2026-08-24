@@ -68,7 +68,9 @@ export async function spawnInstance(
   const volumeRoot = join(root, "volumes");
   await mkdir(volumeRoot, { recursive: true });
   const overrideFile = join(root, "compose.override.yaml");
-  const composeFile = resolve(worktreePath, config.compose.file);
+  const composeFiles = config.compose.files.map((file) => resolve(worktreePath, file));
+  const primaryComposeFile = config.compose.files[0];
+  if (primaryComposeFile === undefined) throw new BranchLiftError("At least one Compose file is required.");
   const composeProject = projectName(repo, `instance-${slug}`);
   const now = new Date().toISOString();
   const metadata: InstanceMetadata = {
@@ -80,7 +82,8 @@ export async function spawnInstance(
     sourceRoot: repo.root,
     worktreePath,
     snapshot: options.snapshot,
-    composeFile: config.compose.file,
+    composeFile: primaryComposeFile,
+    composeFiles: config.compose.files,
     overrideFile,
     composeProject,
     createdAt: now,
@@ -102,7 +105,7 @@ export async function spawnInstance(
     await copyConfiguredFiles(repo, config, worktreePath);
     await writeFile(overrideFile, generateOverride(inspection, volumeRoot, { randomizePorts: true }));
     await writeInstanceMetadata(repo, slug, metadata);
-    const runtime = { cwd: worktreePath, composeFile, overrideFile, project: composeProject };
+    const runtime = { cwd: worktreePath, composeFiles, overrideFile, project: composeProject };
     await validateCompose(runtime);
 
     if (options.start) {
@@ -229,7 +232,7 @@ export async function destroyInstance(
   if (!(await pathExists(root))) throw new BranchLiftError(`No BranchLift instance found for branch ${branch}.`);
   const metadata = await readInstanceMetadata(repo, slug);
   const runtime = runtimeFromMetadata(metadata);
-  if ((await pathExists(runtime.composeFile)) && (await pathExists(runtime.overrideFile))) {
+  if ((await Promise.all(runtime.composeFiles.map(async (file) => await pathExists(file)))).every(Boolean) && (await pathExists(runtime.overrideFile))) {
     await composeDownBestEffort(runtime);
   }
 
@@ -316,7 +319,7 @@ function normalizeHost(host: string): string {
 function runtimeFromMetadata(metadata: InstanceMetadata) {
   return {
     cwd: metadata.worktreePath,
-    composeFile: resolve(metadata.worktreePath, metadata.composeFile),
+    composeFiles: (metadata.composeFiles ?? [metadata.composeFile]).map((file) => resolve(metadata.worktreePath, file)),
     overrideFile: metadata.overrideFile,
     project: metadata.composeProject,
   };

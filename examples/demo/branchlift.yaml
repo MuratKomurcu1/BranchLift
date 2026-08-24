@@ -1,6 +1,7 @@
 version: 1
 compose:
-  file: compose.yaml
+  files:
+    - compose.yaml
   statefulServices:
     - postgres
     - redis

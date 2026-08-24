@@ -1,7 +1,7 @@
 export interface BranchLiftConfig {
   version: 1;
   compose: {
-    file: string;
+    files: string[];
     statefulServices: string[];
   };
   snapshot: {
@@ -41,6 +41,7 @@ export interface PortBinding {
 
 export interface ComposeInspection {
   file: string;
+  files: string[];
   services: string[];
   inferredStatefulServices: string[];
   postgresServices: string[];
@@ -59,6 +60,7 @@ export interface SnapshotMetadata {
   repoKey: string;
   sourceRoot: string;
   composeFile: string;
+  composeFiles?: string[];
   composeProject: string;
   createdAt: string;
   completedAt?: string;
@@ -89,6 +91,7 @@ export interface InstanceMetadata {
   worktreePath: string;
   snapshot: string;
   composeFile: string;
+  composeFiles?: string[];
   overrideFile: string;
   composeProject: string;
   createdAt: string;

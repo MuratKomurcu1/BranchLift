@@ -27,7 +27,7 @@ BranchLift prepares one stopped, immutable golden snapshot and clones its state 
 
 ## Current status
 
-This repository is an early **v0.1**. PostgreSQL 16 and Redis 7 are covered by a real Docker end-to-end test that creates two environments, mutates one, proves the other is unchanged, and resets the first to golden state.
+This repository is an early **v0.2**. PostgreSQL 16 and Redis 7 are covered by a real Docker end-to-end test that creates two environments, mutates one, proves the other is unchanged, resets the first to golden state, and audits orphaned Docker resources.
 
 Supported today:
 
@@ -37,7 +37,10 @@ Supported today:
 - PostgreSQL on macOS Docker Desktop and Linux;
 - Redis and generic named volumes;
 - APFS clonefile and Linux reflink, with recursive-copy fallback;
-- arbitrary agent commands, including `codex` and `claude`.
+- arbitrary agent commands, including `codex` and `claude`;
+- multiple merged Compose files, with legacy `compose.file` compatibility;
+- immutable snapshot listing and dependency-protected deletion;
+- runtime audits and conservative orphan cleanup through `doctor --fix`.
 
 MySQL, MongoDB, Kafka, MinIO, Windows, Podman, and live production imports are not yet claimed as production-ready.
 
@@ -105,7 +108,8 @@ BranchLift never deletes the Git branch.
 ```yaml
 version: 1
 compose:
-  file: compose.yaml
+  files:
+    - compose.yaml
   statefulServices:
     - postgres
     - redis
@@ -133,19 +137,32 @@ snapshot:
 
 The snapshot stack is shut down cleanly before its filesystem state is made available for cloning.
 
+Projects that normally use an override can list files in Compose merge order:
+
+```yaml
+compose:
+  files:
+    - compose.yaml
+    - compose.dev.yaml
+```
+
+The older `compose.file: compose.yaml` form remains readable.
+
 ## Commands
 
 ```text
-branchlift init [--compose FILE]
+branchlift init [--compose FILE]...
 branchlift inspect [--json]
-branchlift snapshot [NAME]
+branchlift snapshot [create] [NAME]
+branchlift snapshot list [--json]
+branchlift snapshot delete NAME
 branchlift spawn BRANCH [--snapshot NAME] [--no-start] [-- AGENT ...]
 branchlift start BRANCH [-- AGENT ...]
 branchlift stop BRANCH
 branchlift reset BRANCH [--no-start]
 branchlift list [--json]
 branchlift destroy BRANCH [--worktree]
-branchlift doctor
+branchlift doctor [--fix] [--json]
 branchlift benchmark [SNAPSHOT] [--iterations N] [--json]
 ```
 
@@ -159,6 +176,8 @@ COMPOSE_PROJECT_NAME
 ```
 
 `BRANCHLIFT_CONTEXT` points to JSON containing the assigned host ports and service endpoints.
+
+`snapshot delete` refuses to remove a snapshot while any instance references it. `doctor` checks snapshot contents, metadata references, worktrees, Compose files, runtime status, and Docker resources. `doctor --fix` only reconciles stale running status and removes exact BranchLift-labeled orphan resources; it does not delete Git branches, worktrees, or database state directories.
 
 ## Safety model
 
