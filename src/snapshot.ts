@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { generateOverride, volumeDirectoryName } from "./compose.js";
 import { assertDockerReady, composeDown, composeDownBestEffort, composeSeed, composeUp, validateCompose } from "./docker.js";
 import { BranchLiftError } from "./errors.js";
+import { snapshotLockScope, withLock } from "./lock.js";
 import { directorySize, pathExists, safeSlug, snapshotRoot, writeJsonAtomic } from "./paths.js";
 import type { ComposeInspection, BranchLiftConfig, RepoInfo, SnapshotMetadata } from "./types.js";
 
@@ -13,6 +14,17 @@ export interface SnapshotResult {
 }
 
 export async function createSnapshot(
+  repo: RepoInfo,
+  config: BranchLiftConfig,
+  inspection: ComposeInspection,
+  name: string,
+): Promise<SnapshotResult> {
+  return await withLock(repo, snapshotLockScope(name), "snapshot create", async () => {
+    return await createSnapshotUnlocked(repo, config, inspection, name);
+  });
+}
+
+async function createSnapshotUnlocked(
   repo: RepoInfo,
   config: BranchLiftConfig,
   inspection: ComposeInspection,
@@ -31,7 +43,7 @@ export async function createSnapshot(
   await assertDockerReady();
   const finalPath = snapshotRoot(repo, name);
   if (await pathExists(finalPath)) {
-    throw new BranchLiftError(`Snapshot already exists: ${name}`, "Choose a new name; snapshots are immutable in v0.1.");
+    throw new BranchLiftError(`Snapshot already exists: ${name}`, "Choose a new name; snapshots are immutable.");
   }
 
   const parent = dirname(finalPath);

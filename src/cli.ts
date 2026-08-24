@@ -12,6 +12,7 @@ import { discoverRepo } from "./git.js";
 import { humanBytes, safeSlug } from "./paths.js";
 import {
   destroyInstance,
+  execInInstance,
   resetInstance,
   spawnInstance,
   startInstance,
@@ -21,7 +22,7 @@ import { createSnapshot } from "./snapshot.js";
 import { deleteSnapshot, listInstances, listSnapshots } from "./state.js";
 import type { ComposeInspection, InstanceMetadata } from "./types.js";
 
-const version = "0.2.0";
+const version = "0.3.0";
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const args = [...argv];
@@ -134,6 +135,16 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const instance = await stopInstance(repo, branch);
         console.log(`Stopped ${instance.branch}; state is preserved.`);
         return 0;
+      }
+      case "exec": {
+        const separator = args.indexOf("--");
+        if (separator < 0) throw new BranchLiftError("branchlift exec requires -- before the command.");
+        const childCommand = args.splice(separator + 1);
+        args.splice(separator, 1);
+        const branch = requirePositional(args, "branch");
+        assertNoArgs(args);
+        if (childCommand.length === 0) throw new BranchLiftError("Missing command after --.");
+        return await execInInstance(repo, branch, childCommand);
       }
       case "reset": {
         const noStart = takeFlag(args, "--no-start");
@@ -288,7 +299,9 @@ function printDoctor(
   console.log(`Git repository: ok (${root})`);
   console.log(`Compose analysis: ${inspection.blockers.length === 0 ? "ok" : `${inspection.blockers.length} blocker(s)`}`);
   console.log(`Docker daemon: ${dockerReady ? "ok" : "unavailable"}`);
-  console.log(`BranchLift state: ${report.snapshots} snapshot(s), ${report.instances} instance(s)`);
+  console.log(
+    `BranchLift state: ${report.snapshots} snapshot(s), ${report.instances} instance(s), ${report.activeLocks} active lock(s)`,
+  );
   inspection.warnings.forEach((warning) => console.log(`warning: ${warning}`));
   inspection.blockers.forEach((blocker) => console.log(`blocker: ${blocker}`));
   report.findings.forEach((finding) => {
@@ -361,6 +374,7 @@ Usage:
   branchlift spawn BRANCH [--snapshot NAME] [--no-start] [-- AGENT ...]
   branchlift start BRANCH [-- AGENT ...]
   branchlift stop BRANCH
+  branchlift exec BRANCH -- COMMAND ...
   branchlift reset BRANCH [--no-start]
   branchlift list [--json]
   branchlift destroy BRANCH [--worktree]
@@ -372,6 +386,7 @@ Examples:
   branchlift spawn fix-auth -- codex
   branchlift spawn billing -- claude
   branchlift reset fix-auth
+  branchlift exec fix-auth -- npm test
 
 Snapshots are immutable. destroy removes BranchLift runtime state but preserves the Git
 worktree and branch unless --worktree is explicitly provided.`);

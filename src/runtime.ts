@@ -11,6 +11,7 @@ import {
 } from "./docker.js";
 import { BranchLiftError } from "./errors.js";
 import { assertCommittedHead, createWorktree, removeCleanWorktree } from "./git.js";
+import { instanceLockScope, snapshotLockScope, withLock } from "./lock.js";
 import {
   cloneDirectory,
   copyPrivateFile,
@@ -44,7 +45,41 @@ export interface StartOptions {
   agentCommand: string[];
 }
 
+export async function execInInstance(repo: RepoInfo, branch: string, command: string[]): Promise<number> {
+  const metadata = await readInstanceMetadata(repo, safeSlug(branch));
+  if (metadata.status !== "running") {
+    throw new BranchLiftError(`Instance ${branch} is ${metadata.status}.`, `Run branchlift start ${branch} first.`);
+  }
+  if (!(await pathExists(metadata.worktreePath))) {
+    throw new BranchLiftError(`Worktree is missing: ${metadata.worktreePath}`);
+  }
+  const [executable, ...args] = command;
+  if (executable === undefined) throw new BranchLiftError("Missing command after --.");
+  const contextFile = join(instanceRoot(repo, metadata.slug), "context.json");
+  const result = await runCommand(executable, args, {
+    cwd: metadata.worktreePath,
+    stdio: "inherit",
+    allowFailure: true,
+    env: instanceEnvironment(metadata, contextFile),
+  });
+  return result.exitCode;
+}
+
 export async function spawnInstance(
+  repo: RepoInfo,
+  config: BranchLiftConfig,
+  inspection: ComposeInspection,
+  branch: string,
+  options: SpawnOptions,
+): Promise<InstanceMetadata> {
+  const metadata = await withLock(repo, instanceLockScope(branch), "spawn", async () => {
+    return await spawnInstanceLocked(repo, config, inspection, branch, options);
+  });
+  await launchAgent(metadata, join(instanceRoot(repo, metadata.slug), "context.json"), options.agentCommand);
+  return metadata;
+}
+
+async function spawnInstanceLocked(
   repo: RepoInfo,
   config: BranchLiftConfig,
   inspection: ComposeInspection,
@@ -55,44 +90,47 @@ export async function spawnInstance(
     throw new BranchLiftError("Compose project is not safely isolatable.", inspection.blockers.join("\n"));
   }
   await assertCommittedHead(repo);
-  const snapshot = await readSnapshotMetadata(repo, options.snapshot);
-  if (snapshot.status !== "ready") throw new BranchLiftError(`Snapshot is not ready: ${options.snapshot}`);
-
   const slug = safeSlug(branch);
   const root = instanceRoot(repo, slug);
-  if (await pathExists(root)) throw new BranchLiftError(`Instance already exists for branch ${branch}.`);
-  const worktreePath = worktreeRoot(repo, slug);
-  await createWorktree(repo, branch, worktreePath);
-  await createExclusiveDirectory(root);
+  const prepared = await withLock(repo, snapshotLockScope(options.snapshot), "spawn", async () => {
+    const snapshot = await readSnapshotMetadata(repo, options.snapshot);
+    if (snapshot.status !== "ready") throw new BranchLiftError(`Snapshot is not ready: ${options.snapshot}`);
+    if (await pathExists(root)) throw new BranchLiftError(`Instance already exists for branch ${branch}.`);
+    const worktreePath = worktreeRoot(repo, slug);
+    await createWorktree(repo, branch, worktreePath);
+    await createExclusiveDirectory(root);
 
-  const volumeRoot = join(root, "volumes");
-  await mkdir(volumeRoot, { recursive: true });
-  const overrideFile = join(root, "compose.override.yaml");
-  const composeFiles = config.compose.files.map((file) => resolve(worktreePath, file));
-  const primaryComposeFile = config.compose.files[0];
-  if (primaryComposeFile === undefined) throw new BranchLiftError("At least one Compose file is required.");
-  const composeProject = projectName(repo, `instance-${slug}`);
-  const now = new Date().toISOString();
-  const metadata: InstanceMetadata = {
-    version: 1,
-    id: randomUUID(),
-    branch,
-    slug,
-    repoKey: repo.key,
-    sourceRoot: repo.root,
-    worktreePath,
-    snapshot: options.snapshot,
-    composeFile: primaryComposeFile,
-    composeFiles: config.compose.files,
-    overrideFile,
-    composeProject,
-    createdAt: now,
-    updatedAt: now,
-    status: "creating",
-    ports: [],
-    copyStrategy: "empty",
-  };
-  await writeInstanceMetadata(repo, slug, metadata);
+    const volumeRoot = join(root, "volumes");
+    await mkdir(volumeRoot, { recursive: true });
+    const overrideFile = join(root, "compose.override.yaml");
+    const composeFiles = config.compose.files.map((file) => resolve(worktreePath, file));
+    const primaryComposeFile = config.compose.files[0];
+    if (primaryComposeFile === undefined) throw new BranchLiftError("At least one Compose file is required.");
+    const composeProject = projectName(repo, `instance-${slug}`);
+    const now = new Date().toISOString();
+    const metadata: InstanceMetadata = {
+      version: 1,
+      id: randomUUID(),
+      branch,
+      slug,
+      repoKey: repo.key,
+      sourceRoot: repo.root,
+      worktreePath,
+      snapshot: options.snapshot,
+      composeFile: primaryComposeFile,
+      composeFiles: config.compose.files,
+      overrideFile,
+      composeProject,
+      createdAt: now,
+      updatedAt: now,
+      status: "creating",
+      ports: [],
+      copyStrategy: "empty",
+    };
+    await writeInstanceMetadata(repo, slug, metadata);
+    return { snapshot, metadata, volumeRoot, overrideFile, composeFiles, composeProject, worktreePath };
+  });
+  const { snapshot, metadata, volumeRoot, overrideFile, composeFiles, composeProject, worktreePath } = prepared;
 
   try {
     for (const volume of snapshot.volumeNames) {
@@ -124,8 +162,6 @@ export async function spawnInstance(
     await markInstanceFailed(repo, slug, metadata, error);
     throw error;
   }
-  const contextFile = join(root, "context.json");
-  await launchAgent(metadata, contextFile, options.agentCommand);
   return metadata;
 }
 
@@ -135,6 +171,19 @@ export async function startInstance(
   inspection: ComposeInspection,
   branch: string,
   options: StartOptions,
+): Promise<InstanceMetadata> {
+  const metadata = await withLock(repo, instanceLockScope(branch), "start", async () => {
+    return await startInstanceLocked(repo, config, inspection, branch);
+  });
+  await launchAgent(metadata, join(instanceRoot(repo, metadata.slug), "context.json"), options.agentCommand);
+  return metadata;
+}
+
+async function startInstanceLocked(
+  repo: RepoInfo,
+  config: BranchLiftConfig,
+  inspection: ComposeInspection,
+  branch: string,
 ): Promise<InstanceMetadata> {
   const slug = safeSlug(branch);
   const metadata = await readInstanceMetadata(repo, slug);
@@ -158,11 +207,16 @@ export async function startInstance(
     await markInstanceFailed(repo, slug, metadata, error);
     throw error;
   }
-  await launchAgent(metadata, contextFile, options.agentCommand);
   return metadata;
 }
 
 export async function stopInstance(repo: RepoInfo, branch: string): Promise<InstanceMetadata> {
+  return await withLock(repo, instanceLockScope(branch), "stop", async () => {
+    return await stopInstanceLocked(repo, branch);
+  });
+}
+
+async function stopInstanceLocked(repo: RepoInfo, branch: string): Promise<InstanceMetadata> {
   const slug = safeSlug(branch);
   const metadata = await readInstanceMetadata(repo, slug);
   await composeDownBestEffort(runtimeFromMetadata(metadata));
@@ -176,6 +230,18 @@ export async function stopInstance(repo: RepoInfo, branch: string): Promise<Inst
 }
 
 export async function resetInstance(
+  repo: RepoInfo,
+  config: BranchLiftConfig,
+  inspection: ComposeInspection,
+  branch: string,
+  start: boolean,
+): Promise<InstanceMetadata> {
+  return await withLock(repo, instanceLockScope(branch), "reset", async () => {
+    return await resetInstanceLocked(repo, config, inspection, branch, start);
+  });
+}
+
+async function resetInstanceLocked(
   repo: RepoInfo,
   config: BranchLiftConfig,
   inspection: ComposeInspection,
@@ -223,6 +289,16 @@ export async function resetInstance(
 }
 
 export async function destroyInstance(
+  repo: RepoInfo,
+  branch: string,
+  removeWorktree: boolean,
+): Promise<{ runtimeRemoved: boolean; worktreeRemoved: boolean }> {
+  return await withLock(repo, instanceLockScope(branch), "destroy", async () => {
+    return await destroyInstanceLocked(repo, branch, removeWorktree);
+  });
+}
+
+async function destroyInstanceLocked(
   repo: RepoInfo,
   branch: string,
   removeWorktree: boolean,
@@ -276,14 +352,29 @@ async function launchAgent(metadata: InstanceMetadata, contextFile: string, agen
   await runCommand(command, args, {
     cwd: metadata.worktreePath,
     stdio: "inherit",
-    env: {
-      ...process.env,
-      BRANCHLIFT_INSTANCE: metadata.id,
-      BRANCHLIFT_CONTEXT: contextFile,
-      BRANCHLIFT_WORKTREE: metadata.worktreePath,
-      COMPOSE_PROJECT_NAME: metadata.composeProject,
-    },
+    env: instanceEnvironment(metadata, contextFile),
   });
+}
+
+function instanceEnvironment(metadata: InstanceMetadata, contextFile: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    BRANCHLIFT_INSTANCE: metadata.id,
+    BRANCHLIFT_CONTEXT: contextFile,
+    BRANCHLIFT_WORKTREE: metadata.worktreePath,
+    COMPOSE_PROJECT_NAME: metadata.composeProject,
+  };
+  for (const port of metadata.ports) {
+    const prefix = `BRANCHLIFT_${environmentName(port.service)}_${port.target}`;
+    env[`${prefix}_HOST`] = normalizeHost(port.host);
+    env[`${prefix}_PORT`] = String(port.port);
+    env[`${prefix}_URL`] = `${port.protocol}://${normalizeHost(port.host)}:${port.port}`;
+  }
+  return env;
+}
+
+function environmentName(value: string): string {
+  return value.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "SERVICE";
 }
 
 async function copyConfiguredFiles(repo: RepoInfo, config: BranchLiftConfig, targetRoot: string): Promise<void> {

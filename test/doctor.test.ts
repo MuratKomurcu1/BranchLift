@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { hostname, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { volumeDirectoryName } from "../src/compose.js";
 import { applyDoctorFixes, auditState } from "../src/doctor.js";
+import { listLocks, lockPath } from "../src/lock.js";
 import { instanceRoot, repoDataRoot, snapshotRoot } from "../src/paths.js";
 import {
   readInstanceMetadata,
@@ -41,6 +42,17 @@ test("doctor reports missing snapshot and runtime files without mutating them", 
     const invalidRoot = join(repoDataRoot(repo), "instances", "invalid");
     await mkdir(invalidRoot, { recursive: true });
     await writeFile(join(invalidRoot, "metadata.json"), "{}\n");
+    const staleLock = lockPath(repo, "instance:abandoned");
+    await mkdir(dirname(staleLock), { recursive: true });
+    await writeFile(staleLock, `${JSON.stringify({
+      version: 1,
+      token: "dead-token",
+      scope: "instance:abandoned",
+      operation: "reset",
+      pid: 2_147_483_647,
+      hostname: hostname(),
+      createdAt: "2026-01-01T00:00:00.000Z",
+    })}\n`);
 
     const report = await auditState(repo);
     const codes = new Set(report.findings.map(({ code }) => code));
@@ -49,7 +61,10 @@ test("doctor reports missing snapshot and runtime files without mutating them", 
     assert.ok(codes.has("instance-override-missing"));
     assert.ok(codes.has("instance-compose-missing"));
     assert.ok(codes.has("state-metadata-invalid"));
+    assert.ok(codes.has("stale-lock"));
     assert.ok(report.findings.filter(({ severity }) => severity === "error").every(({ fixable }) => !fixable));
+    assert.ok((await applyDoctorFixes(repo, report)).some((message) => message.includes("stale operation lock")));
+    assert.deepEqual(await listLocks(repo), []);
   });
 });
 

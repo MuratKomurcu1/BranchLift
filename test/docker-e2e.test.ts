@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { runCommand } from "../src/process.js";
+import { safeSlug } from "../src/paths.js";
 import type { InstanceMetadata } from "../src/types.js";
 
 const enabled = process.env.BRANCHLIFT_E2E === "1";
@@ -14,6 +15,7 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
   const cli = resolve("dist/src/cli.js");
   const env = { ...process.env, BRANCHLIFT_HOME: stateHome };
   let orphanNetwork: string | undefined;
+  let activeLockPath: string | undefined;
 
   try {
     await writeFile(join(root, "compose.yaml"), composeFixture());
@@ -32,6 +34,55 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     assert.deepEqual(snapshots.map(({ name, status }) => ({ name, status })), [{ name: "dev", status: "ready" }]);
     const first = JSON.parse(await run(process.execPath, [cli, "spawn", "agent-a", "--json"], root, env)) as InstanceMetadata;
     assert.equal(await probe(first, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
+
+    await run(
+      process.execPath,
+      [
+        cli,
+        "exec",
+        "agent-a",
+        "--",
+        process.execPath,
+        "-e",
+        "const fs = require('node:fs'); if (!process.env.BRANCHLIFT_POSTGRES_5432_PORT || fs.realpathSync(process.cwd()) !== fs.realpathSync(process.env.BRANCHLIFT_WORKTREE)) process.exit(3)",
+      ],
+      root,
+      env,
+    );
+    const failedExec = await runCommand(
+      process.execPath,
+      [cli, "exec", "agent-a", "--", process.execPath, "-e", "process.exit(7)"],
+      { cwd: root, env, allowFailure: true },
+    );
+    assert.equal(failedExec.exitCode, 7);
+
+    activeLockPath = join(
+      stateHome,
+      "repos",
+      first.repoKey,
+      "locks",
+      `${safeSlug("instance:agent-a")}.lock`,
+    );
+    await mkdir(dirname(activeLockPath), { recursive: true });
+    await writeFile(activeLockPath, `${JSON.stringify({
+      version: 1,
+      token: "active-e2e-lock",
+      scope: "instance:agent-a",
+      operation: "concurrent reset",
+      pid: process.pid,
+      hostname: hostname(),
+      createdAt: new Date().toISOString(),
+    })}\n`);
+    const lockedReset = await runCommand(process.execPath, [cli, "reset", "agent-a"], {
+      cwd: root,
+      env,
+      allowFailure: true,
+    });
+    assert.equal(lockedReset.exitCode, 1);
+    assert.match(lockedReset.stderr, /Another BranchLift operation owns instance:agent-a/);
+    assert.equal(await probe(first, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
+    await unlink(activeLockPath);
+    activeLockPath = undefined;
 
     await sql(first, "UPDATE branchlift_probe SET value = 'changed' WHERE id = 1");
     assert.equal(await probe(first, "SELECT value FROM branchlift_probe WHERE id = 1"), "changed");
@@ -80,6 +131,7 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     await run(process.execPath, [cli, "destroy", "agent-a", "--worktree"], root, env);
     await run(process.execPath, [cli, "destroy", "agent-b", "--worktree"], root, env);
   } finally {
+    if (activeLockPath !== undefined) await unlink(activeLockPath).catch(() => undefined);
     if (orphanNetwork !== undefined) {
       await runCommand("docker", ["network", "rm", orphanNetwork], { allowFailure: true });
     }

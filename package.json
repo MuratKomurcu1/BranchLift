@@ -1,6 +1,6 @@
 {
   "name": "branchlift",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Stateful backend environments for parallel coding agents and git worktrees.",
   "type": "module",
   "bin": {

@@ -2,6 +2,7 @@ import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { volumeDirectoryName } from "./compose.js";
 import { BranchLiftError } from "./errors.js";
+import { listLocks, removeStaleLock } from "./lock.js";
 import { runCommand } from "./process.js";
 import { pathExists, readJson, repoDataRoot, snapshotRoot } from "./paths.js";
 import {
@@ -31,6 +32,7 @@ export interface DoctorFinding {
     | "instance-override-missing"
     | "instance-compose-missing"
     | "state-metadata-invalid"
+    | "stale-lock"
     | "stale-running-status"
     | "lingering-runtime"
     | "orphan-runtime";
@@ -45,6 +47,8 @@ export interface DoctorReport {
   instances: number;
   snapshots: number;
   dockerProjects: number;
+  activeLocks: number;
+  staleLocks: number;
 }
 
 export async function inspectDockerProjects(): Promise<Map<string, DockerProjectState>> {
@@ -88,10 +92,21 @@ export async function auditState(
   repo: RepoInfo,
   dockerProjects?: ReadonlyMap<string, DockerProjectState>,
 ): Promise<DoctorReport> {
-  const [instances, snapshots] = await Promise.all([listInstances(repo), listSnapshots(repo)]);
+  const [instances, snapshots, locks] = await Promise.all([listInstances(repo), listSnapshots(repo), listLocks(repo)]);
   const findings: DoctorFinding[] = [];
   const snapshotNames = new Set(snapshots.map(({ name }) => name));
   const knownProjects = new Set<string>();
+
+  for (const lock of locks) {
+    if (lock.status !== "stale") continue;
+    findings.push({
+      code: "stale-lock",
+      severity: "warning",
+      message: `Stale operation lock ${lock.metadata?.scope ?? lock.path}: ${lock.reason}`,
+      fixable: true,
+      target: lock.path,
+    });
+  }
 
   for (const snapshot of snapshots) {
     knownProjects.add(snapshot.composeProject);
@@ -175,13 +190,24 @@ export async function auditState(
     }
   }
 
-  return { findings, instances: instances.length, snapshots: snapshots.length, dockerProjects: dockerProjects?.size ?? 0 };
+  return {
+    findings,
+    instances: instances.length,
+    snapshots: snapshots.length,
+    dockerProjects: dockerProjects?.size ?? 0,
+    activeLocks: locks.filter(({ status }) => status === "active").length,
+    staleLocks: locks.filter(({ status }) => status === "stale").length,
+  };
 }
 
 export async function applyDoctorFixes(repo: RepoInfo, report: DoctorReport): Promise<string[]> {
   const fixed: string[] = [];
   for (const finding of report.findings) {
     if (!finding.fixable || finding.target === undefined) continue;
+    if (finding.code === "stale-lock") {
+      if (await removeStaleLock(repo, finding.target)) fixed.push(`Removed stale operation lock ${finding.target}.`);
+      continue;
+    }
     if (finding.code === "stale-running-status") {
       const metadata = await readInstanceMetadata(repo, finding.target);
       if (metadata.status !== "running") continue;

@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { instanceRoot, pathExists, readJson, repoDataRoot, snapshotRoot, writeJsonAtomic } from "./paths.js";
 import type { InstanceMetadata, RepoInfo, SnapshotMetadata } from "./types.js";
 import { BranchLiftError } from "./errors.js";
+import { snapshotLockScope, withLock } from "./lock.js";
 
 const metadataFile = "metadata.json";
 
@@ -69,6 +70,12 @@ export async function listSnapshots(repo: RepoInfo): Promise<SnapshotMetadata[]>
 }
 
 export async function deleteSnapshot(repo: RepoInfo, name: string): Promise<void> {
+  await withLock(repo, snapshotLockScope(name), "snapshot delete", async () => {
+    await deleteSnapshotUnlocked(repo, name);
+  });
+}
+
+async function deleteSnapshotUnlocked(repo: RepoInfo, name: string): Promise<void> {
   await readSnapshotMetadata(repo, name);
   const dependants = (await listInstancesStrict(repo)).filter((instance) => instance.snapshot === name);
   if (dependants.length > 0) {
