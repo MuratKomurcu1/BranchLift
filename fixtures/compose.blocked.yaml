@@ -1,0 +1,13 @@
+services:
+  database:
+    image: postgres:16
+    container_name: shared-db
+    network_mode: host
+  cache:
+    image: redis:7
+    volumes:
+      - shared-cache:/data
+
+volumes:
+  shared-cache:
+    external: true

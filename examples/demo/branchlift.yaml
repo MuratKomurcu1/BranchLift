@@ -1,0 +1,19 @@
+version: 1
+compose:
+  file: compose.yaml
+  statefulServices:
+    - postgres
+    - redis
+snapshot:
+  default: dev
+  healthTimeoutSeconds: 120
+  seed:
+    - service: postgres
+      command:
+        - psql
+        - -U
+        - postgres
+        - -c
+        - CREATE TABLE demo_items (id integer PRIMARY KEY, value text NOT NULL); INSERT INTO demo_items VALUES (1, 'golden');
+worktree:
+  copyFiles: []

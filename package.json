@@ -1,0 +1,43 @@
+{
+  "name": "branchlift",
+  "version": "0.1.0",
+  "description": "Stateful backend environments for parallel coding agents and git worktrees.",
+  "type": "module",
+  "bin": {
+    "branchlift": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "docs",
+    "examples"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/test/**/*.test.js",
+    "test:e2e": "BRANCHLIFT_E2E=1 npm test",
+    "start": "node dist/src/cli.js",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "ai-agents",
+    "git-worktree",
+    "docker-compose",
+    "database-branching",
+    "development-environments"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.2"
+  }
+}
