@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -15,6 +15,7 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
   const cli = resolve("dist/src/cli.js");
   const env = { ...process.env, BRANCHLIFT_HOME: stateHome };
   let orphanNetwork: string | undefined;
+  let crashedSnapshotNetwork: string | undefined;
   let activeLockPath: string | undefined;
 
   try {
@@ -100,6 +101,30 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     assert.match(deleteUsedSnapshot.stderr, /still used by 2 instance/);
 
     const projectPrefix = first.composeProject.slice(0, first.composeProject.indexOf("instance-"));
+    const snapshotParent = join(stateHome, "repos", first.repoKey, "snapshots");
+    const crashedSnapshotPath = join(snapshotParent, ".building-crashed-e2e");
+    const crashedSnapshotProject = `${projectPrefix}snapshot-crashed-e2e`;
+    crashedSnapshotNetwork = `${crashedSnapshotProject}-network`;
+    await mkdir(join(crashedSnapshotPath, "volumes"), { recursive: true });
+    await writeFile(join(crashedSnapshotPath, "metadata.json"), `${JSON.stringify({
+      version: 1,
+      name: "crashed-e2e",
+      repoKey: first.repoKey,
+      sourceRoot: root,
+      composeFile: "compose.yaml",
+      composeFiles: ["compose.yaml", "compose.dev.yaml"],
+      composeProject: crashedSnapshotProject,
+      createdAt: new Date().toISOString(),
+      status: "building",
+      volumeNames: ["pgdata", "redisdata"],
+    })}\n`);
+    await run(
+      "docker",
+      ["network", "create", "--label", `com.docker.compose.project=${crashedSnapshotProject}`, crashedSnapshotNetwork],
+      root,
+      env,
+    );
+
     const orphanProject = `${projectPrefix}orphan-e2e`;
     orphanNetwork = `${orphanProject}-network`;
     await run("docker", ["network", "create", "--label", `com.docker.compose.project=${orphanProject}`, orphanNetwork], root, env);
@@ -107,9 +132,22 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
       await run(process.execPath, [cli, "doctor", "--fix", "--json"], root, env),
     ) as { fixes: string[]; report: { findings: Array<{ code: string }> } };
     assert.ok(doctor.fixes.some((message) => message.includes(orphanProject)));
+    assert.ok(doctor.fixes.some((message) => message.includes("Recovered abandoned snapshot build")));
     assert.ok(!doctor.report.findings.some(({ code }) => code === "orphan-runtime"));
+    assert.ok(!doctor.report.findings.some(({ code }) => code === "abandoned-snapshot-build"));
     const orphanAfterFix = await runCommand("docker", ["network", "inspect", orphanNetwork], { allowFailure: true });
     assert.notEqual(orphanAfterFix.exitCode, 0);
+    const crashedNetworkAfterFix = await runCommand("docker", ["network", "inspect", crashedSnapshotNetwork], {
+      allowFailure: true,
+    });
+    assert.notEqual(crashedNetworkAfterFix.exitCode, 0);
+    const recoveredDirectory = (await readdir(snapshotParent)).find((entry) => entry.startsWith(".failed-recovered-crashed-e2e-"));
+    assert.ok(recoveredDirectory);
+    const recoveredMetadata = JSON.parse(
+      await readFile(join(snapshotParent, recoveredDirectory, "metadata.json"), "utf8"),
+    ) as { status: string; error?: string };
+    assert.equal(recoveredMetadata.status, "failed");
+    assert.match(recoveredMetadata.error ?? "", /lost its owner/);
 
     const failedAgent = await runCommand(
       process.execPath,
@@ -134,6 +172,9 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     if (activeLockPath !== undefined) await unlink(activeLockPath).catch(() => undefined);
     if (orphanNetwork !== undefined) {
       await runCommand("docker", ["network", "rm", orphanNetwork], { allowFailure: true });
+    }
+    if (crashedSnapshotNetwork !== undefined) {
+      await runCommand("docker", ["network", "rm", crashedSnapshotNetwork], { allowFailure: true });
     }
     const listed = await runCommand(process.execPath, [cli, "list", "--json"], { cwd: root, env, allowFailure: true });
     if (listed.exitCode === 0) {

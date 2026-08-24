@@ -22,7 +22,7 @@ import { createSnapshot } from "./snapshot.js";
 import { deleteSnapshot, listInstances, listSnapshots } from "./state.js";
 import type { ComposeInspection, InstanceMetadata } from "./types.js";
 
-const version = "0.3.0";
+const version = "0.4.0";
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const args = [...argv];

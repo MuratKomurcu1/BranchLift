@@ -26,9 +26,11 @@ Do not treat worktree isolation as a security boundary.
 
 ## Destructive operations
 
-- Snapshots are immutable in v0.1.
+- Ready snapshots are immutable.
 - `reset` replaces only managed instance-volume contents.
 - `destroy` removes only the selected managed runtime directory.
+- `doctor --fix` removes only exact BranchLift-labeled Docker resources and verified same-host stale locks.
+- Abandoned snapshot recovery preserves volume contents in a `.failed-recovered-*` diagnostic directory.
 - Git worktrees are preserved unless `--worktree` is explicit.
 - A dirty worktree is never removed.
 - Git branches are never deleted.

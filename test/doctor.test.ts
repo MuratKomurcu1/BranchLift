@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { volumeDirectoryName } from "../src/compose.js";
 import { applyDoctorFixes, auditState } from "../src/doctor.js";
-import { listLocks, lockPath } from "../src/lock.js";
+import { listLocks, lockPath, withLock } from "../src/lock.js";
 import { instanceRoot, repoDataRoot, snapshotRoot } from "../src/paths.js";
 import {
   readInstanceMetadata,
@@ -65,6 +65,50 @@ test("doctor reports missing snapshot and runtime files without mutating them", 
     assert.ok(report.findings.filter(({ severity }) => severity === "error").every(({ fixable }) => !fixable));
     assert.ok((await applyDoctorFixes(repo, report)).some((message) => message.includes("stale operation lock")));
     assert.deepEqual(await listLocks(repo), []);
+  });
+});
+
+test("doctor distinguishes a live snapshot build from an abandoned one", async () => {
+  await withState(async (repo) => {
+    const root = join(repoDataRoot(repo), "snapshots", ".building-dev-crash");
+    const metadata: SnapshotMetadata = {
+      version: 1,
+      name: "dev",
+      repoKey: repo.key,
+      sourceRoot: repo.root,
+      composeFile: "compose.yaml",
+      composeProject: `bl-${repo.key.slice(-12)}-snapshot-dev`,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      status: "building",
+      volumeNames: ["db-data"],
+    };
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "metadata.json"), `${JSON.stringify(metadata)}\n`);
+
+    const abandoned = await auditState(repo, new Map());
+    assert.ok(abandoned.findings.some(({ code, fixable }) => code === "abandoned-snapshot-build" && fixable));
+
+    await withLock(repo, "snapshot:dev", "snapshot create", async () => {
+      const live = await auditState(repo, new Map());
+      assert.ok(!live.findings.some(({ code }) => code === "abandoned-snapshot-build"));
+    });
+  });
+});
+
+test("doctor marks an ownerless creating instance as failed", async () => {
+  await withState(async (repo) => {
+    const metadata = await createHealthyState(repo, "creating");
+    const report = await auditState(repo);
+    const recoveryOnly = {
+      ...report,
+      findings: report.findings.filter(({ code }) => code === "abandoned-instance-creation"),
+    };
+
+    assert.equal(recoveryOnly.findings.length, 1);
+    assert.ok((await applyDoctorFixes(repo, recoveryOnly)).some((message) => message.includes(metadata.branch)));
+    const recovered = await readInstanceMetadata(repo, metadata.slug);
+    assert.equal(recovered.status, "failed");
+    assert.match(recovered.error ?? "", /lost its owner/);
   });
 });
 

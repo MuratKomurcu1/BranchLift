@@ -1,10 +1,17 @@
-import { readdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readdir, rename } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { volumeDirectoryName } from "./compose.js";
 import { BranchLiftError } from "./errors.js";
-import { listLocks, removeStaleLock } from "./lock.js";
+import {
+  instanceLockScope,
+  listLocks,
+  removeStaleLock,
+  snapshotLockScope,
+  withLock,
+} from "./lock.js";
 import { runCommand } from "./process.js";
-import { pathExists, readJson, repoDataRoot, snapshotRoot } from "./paths.js";
+import { pathExists, readJson, repoDataRoot, safeSlug, snapshotRoot, writeJsonAtomic } from "./paths.js";
 import {
   isInstanceMetadata,
   isSnapshotMetadata,
@@ -13,7 +20,7 @@ import {
   readInstanceMetadata,
   writeInstanceMetadata,
 } from "./state.js";
-import type { InstanceMetadata, RepoInfo } from "./types.js";
+import type { InstanceMetadata, RepoInfo, SnapshotMetadata } from "./types.js";
 
 export type DoctorSeverity = "warning" | "error";
 
@@ -27,11 +34,13 @@ export interface DoctorFinding {
     | "snapshot-not-ready"
     | "snapshot-volume-missing"
     | "snapshot-diagnostic-state"
+    | "abandoned-snapshot-build"
     | "instance-snapshot-missing"
     | "instance-worktree-missing"
     | "instance-override-missing"
     | "instance-compose-missing"
     | "state-metadata-invalid"
+    | "abandoned-instance-creation"
     | "stale-lock"
     | "stale-running-status"
     | "lingering-runtime"
@@ -40,6 +49,7 @@ export interface DoctorFinding {
   message: string;
   fixable: boolean;
   target?: string;
+  snapshotName?: string;
 }
 
 export interface DoctorReport {
@@ -49,6 +59,7 @@ export interface DoctorReport {
   dockerProjects: number;
   activeLocks: number;
   staleLocks: number;
+  dockerAudited: boolean;
 }
 
 export async function inspectDockerProjects(): Promise<Map<string, DockerProjectState>> {
@@ -96,6 +107,11 @@ export async function auditState(
   const findings: DoctorFinding[] = [];
   const snapshotNames = new Set(snapshots.map(({ name }) => name));
   const knownProjects = new Set<string>();
+  const activeLockScopes = new Set(
+    locks
+      .filter(({ status, metadata }) => status === "active" && metadata !== undefined)
+      .map(({ metadata }) => metadata!.scope),
+  );
 
   for (const lock of locks) {
     if (lock.status !== "stale") continue;
@@ -141,11 +157,25 @@ export async function auditState(
     }
   }
 
-  for (const project of await auditDiagnosticSnapshotDirectories(repo, findings)) knownProjects.add(project);
+  for (const project of await auditDiagnosticSnapshotDirectories(
+    repo,
+    findings,
+    activeLockScopes,
+    dockerProjects,
+  )) knownProjects.add(project);
   await auditInvalidMetadata(repo, findings);
 
   for (const instance of instances) {
     knownProjects.add(instance.composeProject);
+    if (instance.status === "creating" && !activeLockScopes.has(instanceLockScope(instance.branch))) {
+      findings.push({
+        code: "abandoned-instance-creation",
+        severity: "warning",
+        message: `Instance ${instance.branch} was left in creating state without a live owner.`,
+        fixable: true,
+        target: instance.slug,
+      });
+    }
     if (!snapshotNames.has(instance.snapshot)) {
       findings.push({
         code: "instance-snapshot-missing",
@@ -197,6 +227,7 @@ export async function auditState(
     dockerProjects: dockerProjects?.size ?? 0,
     activeLocks: locks.filter(({ status }) => status === "active").length,
     staleLocks: locks.filter(({ status }) => status === "stale").length,
+    dockerAudited: dockerProjects !== undefined,
   };
 }
 
@@ -206,6 +237,26 @@ export async function applyDoctorFixes(repo: RepoInfo, report: DoctorReport): Pr
     if (!finding.fixable || finding.target === undefined) continue;
     if (finding.code === "stale-lock") {
       if (await removeStaleLock(repo, finding.target)) fixed.push(`Removed stale operation lock ${finding.target}.`);
+      continue;
+    }
+    if (finding.code === "abandoned-snapshot-build") {
+      if (!report.dockerAudited) continue;
+      const recovered = await recoverAbandonedSnapshot(repo, finding);
+      if (recovered !== undefined) fixed.push(`Recovered abandoned snapshot build at ${recovered}.`);
+      continue;
+    }
+    if (finding.code === "abandoned-instance-creation") {
+      const metadata = await readInstanceMetadata(repo, finding.target);
+      await withLock(repo, instanceLockScope(metadata.branch), "doctor recovery", async () => {
+        const current = await readInstanceMetadata(repo, finding.target!);
+        if (current.status !== "creating") return;
+        current.status = "failed";
+        current.ports = [];
+        current.error = "Recovered by doctor after the creating operation lost its owner.";
+        current.updatedAt = new Date().toISOString();
+        await writeInstanceMetadata(repo, current.slug, current);
+        fixed.push(`Marked abandoned instance ${current.branch} as failed.`);
+      });
       continue;
     }
     if (finding.code === "stale-running-status") {
@@ -260,30 +311,83 @@ async function auditInstanceFiles(instance: InstanceMetadata, findings: DoctorFi
   }
 }
 
-async function auditDiagnosticSnapshotDirectories(repo: RepoInfo, findings: DoctorFinding[]): Promise<Set<string>> {
+async function auditDiagnosticSnapshotDirectories(
+  repo: RepoInfo,
+  findings: DoctorFinding[],
+  activeLockScopes: ReadonlySet<string>,
+  dockerProjects?: ReadonlyMap<string, DockerProjectState>,
+): Promise<Set<string>> {
   const root = join(repoDataRoot(repo), "snapshots");
   const projects = new Set<string>();
   if (!(await pathExists(root))) return projects;
   for (const entry of await readdir(root, { withFileTypes: true })) {
     if (!entry.isDirectory() || (!entry.name.startsWith(".failed-") && !entry.name.startsWith(".building-"))) continue;
     const metadataPath = join(root, entry.name, "metadata.json");
+    let metadata: SnapshotMetadata | undefined;
     if (await pathExists(metadataPath)) {
       try {
-        const metadata = await readJson<unknown>(metadataPath);
-        if (isSnapshotMetadata(metadata)) projects.add(metadata.composeProject);
+        const value = await readJson<unknown>(metadataPath);
+        if (isSnapshotMetadata(value)) {
+          metadata = value;
+          projects.add(value.composeProject);
+        }
       } catch {
         // Invalid metadata is reported separately.
       }
     }
+    const path = join(root, entry.name);
+    if (
+      entry.name.startsWith(".building-")
+      && metadata?.status === "building"
+      && !activeLockScopes.has(snapshotLockScope(metadata.name))
+    ) {
+      findings.push({
+        code: "abandoned-snapshot-build",
+        severity: "warning",
+        message: `Snapshot ${metadata.name} was left building without a live owner at ${path}.`,
+        fixable: dockerProjects !== undefined,
+        target: path,
+        snapshotName: metadata.name,
+      });
+      continue;
+    }
+    if (entry.name.startsWith(".building-") && metadata?.status === "building") continue;
     findings.push({
       code: "snapshot-diagnostic-state",
       severity: "warning",
-      message: `Diagnostic snapshot state is preserved at ${join(root, entry.name)}.`,
+      message: `Diagnostic snapshot state is preserved at ${path}.`,
       fixable: false,
       target: entry.name,
     });
   }
   return projects;
+}
+
+async function recoverAbandonedSnapshot(repo: RepoInfo, finding: DoctorFinding): Promise<string | undefined> {
+  if (finding.target === undefined || finding.snapshotName === undefined) return undefined;
+  const parent = resolve(repoDataRoot(repo), "snapshots");
+  const target = resolve(finding.target);
+  if (!target.startsWith(`${parent}/`)) {
+    throw new BranchLiftError(`Refusing to recover snapshot state outside BranchLift: ${target}`);
+  }
+
+  return await withLock(repo, snapshotLockScope(finding.snapshotName), "doctor recovery", async () => {
+    if (!(await pathExists(target))) return undefined;
+    const metadataPath = join(target, "metadata.json");
+    const value = await readJson<unknown>(metadataPath);
+    if (!isSnapshotMetadata(value) || value.status !== "building" || value.name !== finding.snapshotName) {
+      return undefined;
+    }
+    const projects = await inspectDockerProjects();
+    if (projects.has(value.composeProject)) await removeDockerProject(value.composeProject);
+    value.status = "failed";
+    value.completedAt = new Date().toISOString();
+    value.error = "Recovered by doctor after the snapshot build lost its owner.";
+    await writeJsonAtomic(metadataPath, value);
+    const failedPath = join(parent, `.failed-recovered-${safeSlug(value.name)}-${Date.now()}-${randomUUID().slice(0, 6)}`);
+    await rename(target, failedPath);
+    return failedPath;
+  });
 }
 
 async function auditInvalidMetadata(repo: RepoInfo, findings: DoctorFinding[]): Promise<void> {

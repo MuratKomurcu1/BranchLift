@@ -27,7 +27,7 @@ BranchLift prepares one stopped, immutable golden snapshot and clones its state 
 
 ## Current status
 
-This repository is an early **v0.3**. PostgreSQL 16 and Redis 7 are covered by a real Docker end-to-end test that creates two environments, mutates one, proves the other is unchanged, resets the first to golden state, rejects a concurrent lifecycle mutation, executes a context-aware child command, and audits orphaned Docker resources.
+This repository is an early **v0.4**. PostgreSQL 16 and Redis 7 are covered by a real Docker end-to-end test that creates two environments, mutates one, proves the other is unchanged, rejects a concurrent lifecycle mutation, executes a context-aware child command, and recovers an abandoned snapshot build without discarding its diagnostic state.
 
 Supported today:
 
@@ -42,7 +42,8 @@ Supported today:
 - immutable snapshot listing and dependency-protected deletion;
 - runtime audits and conservative orphan cleanup through `doctor --fix`;
 - cross-process snapshot and instance locks with stale-owner diagnosis;
-- context-aware host commands through `branchlift exec`.
+- context-aware host commands through `branchlift exec`;
+- crash recovery for abandoned snapshot builds and instance creation.
 
 MySQL, MongoDB, Kafka, MinIO, Windows, Podman, and live production imports are not yet claimed as production-ready.
 
@@ -189,7 +190,7 @@ BRANCHLIFT_<SERVICE>_<CONTAINER_PORT>_URL
 
 `BRANCHLIFT_CONTEXT` points to JSON containing the assigned host ports and service endpoints. For example, a PostgreSQL service exposing container port 5432 receives `BRANCHLIFT_POSTGRES_5432_PORT`.
 
-`snapshot delete` refuses to remove a snapshot while any instance references it. `doctor` checks snapshot contents, metadata references, worktrees, Compose files, lifecycle locks, runtime status, and Docker resources. `doctor --fix` only removes verified stale locks, reconciles stale running status, and removes exact BranchLift-labeled orphan resources; it does not delete Git branches, worktrees, or database state directories.
+`snapshot delete` refuses to remove a snapshot while any instance references it. `doctor` checks snapshot contents, metadata references, worktrees, Compose files, lifecycle locks, runtime status, and Docker resources. `doctor --fix` removes verified stale locks, reconciles abandoned operations, and removes exact BranchLift-labeled orphan resources. Recovered snapshot data is renamed into `.failed-recovered-*` diagnostic state rather than deleted. Git branches, worktrees, and managed database state directories are not silently discarded.
 
 ## Safety model
 
