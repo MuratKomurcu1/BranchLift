@@ -31,6 +31,8 @@ export interface BindMount {
   source: string;
   target: string;
   service: string;
+  readOnly: boolean;
+  sharedAcrossWorktrees: boolean;
 }
 
 export interface PortBinding {
@@ -45,11 +47,14 @@ export interface ComposeInspection {
   services: string[];
   inferredStatefulServices: string[];
   postgresServices: string[];
+  mysqlServices: string[];
+  serviceCommands: Record<string, string | string[]>;
   volumes: VolumeBinding[];
   bindMounts: BindMount[];
   ports: PortBinding[];
   blockers: string[];
   warnings: string[];
+  recommendations: string[];
 }
 
 export type SnapshotStatus = "building" | "ready" | "failed";

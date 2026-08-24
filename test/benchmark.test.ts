@@ -37,9 +37,12 @@ test("benchmarks immutable state clones and cleans temporary copies", async () =
     const result = await benchmarkSnapshot(repo, "dev", 3);
 
     assert.equal(result.iterations, 3);
-    assert.equal(result.samplesMs.length, 3);
+    assert.equal(result.cloneSamplesMs.length, 3);
+    assert.equal(result.fullCopySamplesMs.length, 3);
     assert.equal(result.logicalBytes, 12);
-    assert.ok(result.medianMs >= 0);
+    assert.ok(result.cloneMedianMs >= 0);
+    assert.ok(result.fullCopyMedianMs >= 0);
+    assert.ok(result.speedup >= 0);
   } finally {
     if (previous === undefined) delete process.env.BRANCHLIFT_HOME;
     else process.env.BRANCHLIFT_HOME = previous;

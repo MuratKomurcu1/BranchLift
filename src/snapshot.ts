@@ -1,7 +1,7 @@
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { generateOverride, postgresDataVolumes, volumeDirectoryName } from "./compose.js";
+import { generateOverride, mysqlDataVolumes, postgresDataVolumes, volumeDirectoryName } from "./compose.js";
 import {
   assertDockerReady,
   composeDown,
@@ -62,9 +62,8 @@ async function createSnapshotUnlocked(
   const staging = join(parent, `.building-${safeSlug(name)}-${buildId}`);
   const volumeRoot = join(staging, "volumes");
   const project = projectName(repo, `snapshot-${name}`);
-  const nativeExports = process.platform === "darwin"
-    ? [...new Map(postgresDataVolumes(inspection).map((volume) => [volume.source, volume])).values()]
-    : [];
+  const nativeBootstrapVolumes = [...postgresDataVolumes(inspection), ...mysqlDataVolumes(inspection)];
+  const nativeExports = [...new Map(nativeBootstrapVolumes.map((volume) => [volume.source, volume])).values()];
   const nativeVolumes = new Map(
     nativeExports.map((volume) => [
       volume.source,
@@ -90,7 +89,13 @@ async function createSnapshotUnlocked(
       inspection,
       volumeRoot,
       nativeVolumes.size > 0
-        ? { randomizePorts: true, nativeVolumes, postgresHostUser: false }
+        ? {
+            randomizePorts: true,
+            nativeVolumes,
+            postgresHostUser: false,
+            mysqlHostUser: false,
+            mysqlLowerCaseTableNames: 1,
+          }
         : { randomizePorts: true },
     ),
   );

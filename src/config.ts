@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parse, stringify } from "yaml";
-import { findComposeFile, inspectCompose, relativeComposePath } from "./compose.js";
+import { findComposeFile, findComposeFiles, inspectCompose, relativeComposePath } from "./compose.js";
 import { BranchLiftError } from "./errors.js";
 import { pathExists } from "./paths.js";
 import type { ComposeInspection, BranchLiftConfig, RepoInfo, SeedStep } from "./types.js";
@@ -11,16 +11,22 @@ export const configFileName = "branchlift.yaml";
 export async function initializeConfig(
   repo: RepoInfo,
   requestedCompose?: string | string[],
-): Promise<{ config: BranchLiftConfig; inspection: ComposeInspection; path: string }> {
+  options: { write?: boolean } = {},
+): Promise<{ config: BranchLiftConfig; inspection: ComposeInspection; path: string; written: boolean }> {
   const path = join(repo.root, configFileName);
-  if (await pathExists(path)) {
+  const write = options.write !== false;
+  if (write && await pathExists(path)) {
     throw new BranchLiftError(`${configFileName} already exists.`, "Edit the existing file or run branchlift inspect.");
   }
   const requested = requestedCompose === undefined ? undefined : Array.isArray(requestedCompose) ? requestedCompose : [requestedCompose];
   const composeFiles = requested === undefined
-    ? [await findComposeFile(repo.root)]
+    ? await findComposeFiles(repo.root)
     : await Promise.all(requested.map(async (file) => await findComposeFile(repo.root, file)));
   const inspection = await inspectCompose(composeFiles);
+  const copyFiles: string[] = [];
+  for (const candidate of [".env", ".env.local"]) {
+    if (await pathExists(join(repo.root, candidate))) copyFiles.push(candidate);
+  }
   const config: BranchLiftConfig = {
     version: 1,
     compose: {
@@ -33,12 +39,14 @@ export async function initializeConfig(
       seed: [],
     },
     worktree: {
-      copyFiles: [".env"],
+      copyFiles,
     },
   };
-  const preamble = "# BranchLift project configuration. Commit this file.\n";
-  await writeFile(path, `${preamble}${stringify(config, { indent: 2 })}`, { flag: "wx" });
-  return { config, inspection, path };
+  if (write) {
+    const preamble = "# BranchLift project configuration. Commit this file.\n";
+    await writeFile(path, `${preamble}${stringify(config, { indent: 2 })}`, { flag: "wx" });
+  }
+  return { config, inspection, path, written: write };
 }
 
 export async function loadConfig(repo: RepoInfo): Promise<BranchLiftConfig> {
@@ -46,7 +54,13 @@ export async function loadConfig(repo: RepoInfo): Promise<BranchLiftConfig> {
   if (!(await pathExists(path))) {
     throw new BranchLiftError(`${configFileName} not found.`, "Run branchlift init first.");
   }
-  const raw = parse(await readFile(path, "utf8")) as unknown;
+  let raw: unknown;
+  try {
+    raw = parse(await readFile(path, "utf8")) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new BranchLiftError(`Unable to parse ${configFileName}.`, detail);
+  }
   if (!isMap(raw) || raw.version !== 1) throw new BranchLiftError(`Unsupported or invalid ${configFileName}.`);
 
   const compose = requireMap(raw.compose, "compose");
@@ -88,6 +102,20 @@ export async function inspectConfiguredCompose(
     } else if (!inspection.volumes.some((volume) => volume.service === service)) {
       inspection.blockers.push(`Configured stateful service ${service} has no managed named volume to snapshot.`);
     }
+    if (!inspection.inferredStatefulServices.includes(service)) {
+      for (const mount of inspection.bindMounts.filter((item) => item.service === service && !item.readOnly && item.sharedAcrossWorktrees)) {
+        const blocker = `Configured stateful service ${service} uses shared writable bind ${mount.source} -> ${mount.target}.`;
+        if (!inspection.blockers.includes(blocker)) inspection.blockers.push(blocker);
+        const recommendation = `Use a worktree-local relative path, a read-only bind, or a managed named volume for ${service}:${mount.target}.`;
+        if (!inspection.recommendations.includes(recommendation)) inspection.recommendations.push(recommendation);
+      }
+    }
+  }
+  for (const seed of config.snapshot.seed) {
+    if (!inspection.services.includes(seed.service)) {
+      inspection.blockers.push(`Snapshot seed service does not exist: ${seed.service}`);
+      inspection.recommendations.push(`Change snapshot.seed service ${seed.service} to a service declared by Compose.`);
+    }
   }
   return inspection;
 }
@@ -96,9 +124,11 @@ function parseSeed(value: unknown): SeedStep[] {
   if (!Array.isArray(value)) throw new BranchLiftError("snapshot.seed must be an array.");
   return value.map((item, index) => {
     const map = requireMap(item, `snapshot.seed[${index}]`);
+    const command = stringArray(map.command, `snapshot.seed[${index}].command`);
+    if (command.length === 0) throw new BranchLiftError(`snapshot.seed[${index}].command must not be empty.`);
     return {
       service: requireString(map.service, `snapshot.seed[${index}].service`),
-      command: stringArray(map.command, `snapshot.seed[${index}].command`),
+      command,
     };
   });
 }

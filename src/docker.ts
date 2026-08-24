@@ -16,6 +16,27 @@ export async function assertDockerReady(): Promise<void> {
   }
   const compose = await runCommand("docker", ["compose", "version"], { allowFailure: true });
   if (compose.exitCode !== 0) throw new BranchLiftError("Docker Compose v2 is required.");
+  const version = parseComposeVersion(compose.stdout || compose.stderr);
+  if (version !== undefined && compareVersion(version, [2, 24, 4]) < 0) {
+    throw new BranchLiftError(
+      `Docker Compose 2.24.4 or newer is required; found ${version.join(".")}.`,
+      "Upgrade Docker Desktop or the Docker Compose plugin. BranchLift uses the Compose !override merge tag for collision-free ports.",
+    );
+  }
+}
+
+export function parseComposeVersion(value: string): [number, number, number] | undefined {
+  const match = /(?:^|\s)v?(\d+)\.(\d+)\.(\d+)/.exec(value);
+  if (match === null) return undefined;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function compareVersion(left: readonly number[], right: readonly number[]): number {
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
 }
 
 export async function validateCompose(runtime: ComposeRuntime): Promise<void> {

@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse } from "yaml";
 import { BranchLiftError } from "./errors.js";
 import { pathExists, safeSlug } from "./paths.js";
@@ -9,6 +9,12 @@ import type { BindMount, ComposeInspection, PortBinding, VolumeBinding } from ".
 type UnknownMap = Record<string, unknown>;
 
 const composeCandidates = ["compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"];
+const composeOverrides: Record<string, string[]> = {
+  "compose.yaml": ["compose.override.yaml", "compose.override.yml"],
+  "compose.yml": ["compose.override.yml", "compose.override.yaml"],
+  "docker-compose.yaml": ["docker-compose.override.yaml", "docker-compose.override.yml"],
+  "docker-compose.yml": ["docker-compose.override.yml", "docker-compose.override.yaml"],
+};
 const statefulPattern = /(?:^|[\/_-])(postgres(?:ql)?|mysql|mariadb|mongo(?:db)?|redis|valkey|minio|clickhouse|kafka|redpanda|rabbitmq|nats|qdrant|weaviate|elasticsearch|opensearch)(?::|$|[\/_-])/i;
 
 export async function findComposeFile(root: string, requested?: string): Promise<string> {
@@ -25,6 +31,16 @@ export async function findComposeFile(root: string, requested?: string): Promise
     "No Compose file found.",
     `Expected one of: ${composeCandidates.join(", ")}. Pass an explicit path with --compose.`,
   );
+}
+
+export async function findComposeFiles(root: string): Promise<string[]> {
+  const base = await findComposeFile(root);
+  const candidates = composeOverrides[relative(root, base)] ?? [];
+  for (const candidate of candidates) {
+    const override = join(root, candidate);
+    if (await pathExists(override)) return [base, override];
+  }
+  return [base];
 }
 
 export async function inspectCompose(input: string | string[]): Promise<ComposeInspection> {
@@ -51,8 +67,11 @@ export async function inspectCompose(input: string | string[]): Promise<ComposeI
   const ports: PortBinding[] = [];
   const blockers: string[] = [];
   const warnings: string[] = [];
+  const recommendations: string[] = [];
   const inferredStatefulServices: string[] = [];
   const postgresServices: string[] = [];
+  const mysqlServices: string[] = [];
+  const serviceCommands: Record<string, string | string[]> = {};
 
   for (const [serviceName, rawService] of Object.entries(serviceMap)) {
     if (!isMap(rawService)) {
@@ -60,15 +79,22 @@ export async function inspectCompose(input: string | string[]): Promise<ComposeI
       continue;
     }
     const image = typeof rawService.image === "string" ? rawService.image : "";
+    if (typeof rawService.command === "string") serviceCommands[serviceName] = rawService.command;
+    else if (Array.isArray(rawService.command) && rawService.command.every((item) => typeof item === "string")) {
+      serviceCommands[serviceName] = rawService.command;
+    }
     const stateful = statefulPattern.test(`/${serviceName}`) || statefulPattern.test(`/${image}`);
     if (stateful) inferredStatefulServices.push(serviceName);
     if (/(?:^|[\/_-])postgres(?:ql)?(?::|$|[\/_-])/i.test(`/${image}`)) postgresServices.push(serviceName);
+    if (/(?:^|[\/_-])mysql(?::|$|[\/_-])/i.test(`/${image}`)) mysqlServices.push(serviceName);
 
     if (typeof rawService.container_name === "string") {
       blockers.push(`Service ${serviceName} sets container_name; fixed names collide across worktrees.`);
+      recommendations.push(`Remove ${serviceName}.container_name and let Compose derive a project-scoped container name.`);
     }
     if (rawService.network_mode === "host") {
       blockers.push(`Service ${serviceName} uses host networking and cannot be port-isolated.`);
+      recommendations.push(`Replace ${serviceName}.network_mode: host with normal Compose networking and declared ports.`);
     }
     if (rawService.pid === "host" || rawService.ipc === "host") {
       warnings.push(`Service ${serviceName} shares a host namespace (${rawService.pid === "host" ? "pid" : "ipc"}).`);
@@ -78,18 +104,31 @@ export async function inspectCompose(input: string | string[]): Promise<ComposeI
     let namedVolumeCount = 0;
     for (const rawVolume of serviceVolumes) {
       const mount = parseVolume(rawVolume, serviceName, externalVolumes);
-      if (mount === undefined) continue;
+      if (mount === undefined) {
+        const description = describeUnsupportedMount(rawVolume);
+        warnings.push(`Service ${serviceName} has ${description}; BranchLift leaves it under Compose control.`);
+        continue;
+      }
       if ("external" in mount) {
         namedVolumeCount += 1;
         volumes.push(mount);
-        if (mount.external) blockers.push(`Volume ${mount.source} used by ${serviceName} is external and cannot be cloned safely.`);
+        if (mount.external) {
+          blockers.push(`Volume ${mount.source} used by ${serviceName} is external and cannot be cloned safely.`);
+          recommendations.push(`Make ${mount.source} a project-managed named volume or remove it from statefulServices.`);
+        }
       } else {
         bindMounts.push(mount);
-        warnings.push(`Writable bind mount ${mount.source} -> ${serviceName}:${mount.target} may leak state across worktrees.`);
+        if (!mount.readOnly && mount.sharedAcrossWorktrees) {
+          const message = `Shared writable bind mount ${mount.source} -> ${serviceName}:${mount.target} can leak state across worktrees.`;
+          if (stateful) blockers.push(message);
+          else warnings.push(message);
+          recommendations.push(`Use a relative worktree-local path, a read-only bind, or a managed named volume for ${serviceName}:${mount.target}.`);
+        }
       }
     }
     if (stateful && namedVolumeCount === 0) {
       blockers.push(`Stateful service ${serviceName} has no managed named volume to snapshot.`);
+      recommendations.push(`Mount the durable data directory of ${serviceName} from a non-external named volume.`);
     }
 
     const servicePorts = Array.isArray(rawService.ports) ? rawService.ports : [];
@@ -110,23 +149,37 @@ export async function inspectCompose(input: string | string[]): Promise<ComposeI
     services,
     inferredStatefulServices: inferredStatefulServices.sort(),
     postgresServices: postgresServices.sort(),
+    mysqlServices: mysqlServices.sort(),
+    serviceCommands,
     volumes,
     bindMounts,
     ports,
     blockers: unique(blockers),
     warnings: unique(warnings),
+    recommendations: unique(recommendations),
   };
 }
 
 async function readComposeDocument(file: string): Promise<unknown> {
-  return parse(await readFile(file, "utf8")) as unknown;
+  try {
+    return parse(await readFile(file, "utf8")) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new BranchLiftError(`Unable to parse Compose file: ${file}`, detail);
+  }
 }
 
 async function readMergedComposeDocument(files: string[]): Promise<unknown> {
   const args = ["compose"];
   for (const file of files) args.push("-f", file);
   args.push("config", "--format", "json");
-  const result = await runCommand("docker", args, { cwd: resolve(files[0]!, "..") });
+  let result;
+  try {
+    result = await runCommand("docker", args, { cwd: dirname(files[0]!) });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new BranchLiftError("Unable to merge the configured Compose files.", detail);
+  }
   try {
     return JSON.parse(result.stdout) as unknown;
   } catch {
@@ -140,12 +193,20 @@ export function generateOverride(
   options: {
     randomizePorts: boolean;
     postgresHostUser?: { uid: number; gid: number } | false;
+    mysqlHostUser?: { uid: number; gid: number } | false;
+    mysqlLowerCaseTableNames?: 0 | 1 | 2 | false;
     nativeVolumes?: ReadonlyMap<string, string>;
   },
 ): string {
   const postgresHostUser = options.postgresHostUser === false
     ? undefined
     : options.postgresHostUser ?? localPostgresBindUser();
+  const mysqlHostUser = options.mysqlHostUser === false
+    ? undefined
+    : options.mysqlHostUser ?? localMysqlBindUser();
+  const mysqlLowerCaseTableNames = options.mysqlLowerCaseTableNames === false
+    ? undefined
+    : options.mysqlLowerCaseTableNames ?? 1;
   const nativeVolumes = options.nativeVolumes ?? new Map<string, string>();
   const byService = new Map<string, VolumeBinding[]>();
   for (const volume of inspection.volumes) {
@@ -169,7 +230,9 @@ export function generateOverride(
     lines.push(`  ${quote(service)}:`);
     const serviceVolumes = byService.get(service) ?? [];
     if (serviceVolumes.length > 0) {
-      lines.push("    volumes: !override");
+      // Compose merges mounts by container target, so replacing only managed
+      // targets preserves unrelated bind, tmpfs, secret, and config mounts.
+      lines.push("    volumes:");
       for (const volume of serviceVolumes) {
         const nativeVolume = nativeVolumes.get(volume.source);
         lines.push(`      - type: ${nativeVolume === undefined ? "bind" : "volume"}`);
@@ -194,6 +257,17 @@ export function generateOverride(
         );
       }
     }
+    if (inspection.mysqlServices.includes(service) && serviceVolumes.length > 0) {
+      if (mysqlHostUser !== undefined) lines.push(`    user: ${quote(`${mysqlHostUser.uid}:${mysqlHostUser.gid}`)}`);
+      if (mysqlLowerCaseTableNames !== undefined) {
+        const command = withServiceArgument(
+          inspection.serviceCommands[service],
+          "--lower-case-table-names=",
+          `--lower-case-table-names=${mysqlLowerCaseTableNames}`,
+        );
+        lines.push(`    command: ${Array.isArray(command) ? JSON.stringify(command) : quote(command)}`);
+      }
+    }
     const servicePorts = portsByService.get(service) ?? [];
     if (servicePorts.length > 0) {
       lines.push("    ports: !override");
@@ -214,7 +288,15 @@ export function generateOverride(
 }
 
 export function localPostgresBindUser(): { uid: number; gid: number } | undefined {
-  if (process.platform !== "darwin" || process.getuid === undefined || process.getgid === undefined) return undefined;
+  return localBindUser();
+}
+
+export function localMysqlBindUser(): { uid: number; gid: number } | undefined {
+  return localBindUser();
+}
+
+function localBindUser(): { uid: number; gid: number } | undefined {
+  if (!new Set(["darwin", "linux"]).has(process.platform) || process.getuid === undefined || process.getgid === undefined) return undefined;
   const uid = process.getuid();
   const gid = process.getgid();
   return uid > 0 ? { uid, gid } : undefined;
@@ -228,6 +310,15 @@ export function postgresDataVolumes(inspection: ComposeInspection): VolumeBindin
   const found: VolumeBinding[] = [];
   for (const service of inspection.postgresServices) {
     const dataVolume = selectPostgresDataVolume(inspection.volumes.filter((volume) => volume.service === service));
+    if (dataVolume !== undefined) found.push(dataVolume);
+  }
+  return found;
+}
+
+export function mysqlDataVolumes(inspection: ComposeInspection): VolumeBinding[] {
+  const found: VolumeBinding[] = [];
+  for (const service of inspection.mysqlServices) {
+    const dataVolume = selectMysqlDataVolume(inspection.volumes.filter((volume) => volume.service === service));
     if (dataVolume !== undefined) found.push(dataVolume);
   }
   return found;
@@ -262,7 +353,9 @@ function parseVolume(
     const source = parts.slice(0, targetIndex).join(":");
     if (!target || !source) return undefined;
     const readOnly = hasMode && possibleMode.split(",").includes("ro");
-    if (isBindSource(source)) return { source, target, service };
+    if (isBindSource(source)) {
+      return { source, target, service, readOnly, sharedAcrossWorktrees: isSharedBindSource(source) };
+    }
     return { source, target, service, readOnly, external: externalVolumes.has(source) };
   }
 
@@ -271,7 +364,15 @@ function parseVolume(
   const source = typeof value.source === "string" ? value.source : undefined;
   const target = typeof value.target === "string" ? value.target : undefined;
   if (source === undefined || target === undefined) return undefined;
-  if (type === "bind") return { source, target, service };
+  if (type === "bind") {
+    return {
+      source,
+      target,
+      service,
+      readOnly: value.read_only === true,
+      sharedAcrossWorktrees: isSharedBindSource(source),
+    };
+  }
   if (type !== "volume") return undefined;
   return {
     source,
@@ -301,7 +402,23 @@ function parsePort(value: unknown, service: string): PortBinding | undefined {
 }
 
 function isBindSource(source: string): boolean {
-  return source.startsWith(".") || source.startsWith("/") || source.startsWith("~") || /^[A-Za-z]:[\\/]/.test(source);
+  return source.includes("${") || source.startsWith(".") || source.startsWith("/") || source.startsWith("~") || /^[A-Za-z]:[\\/]/.test(source);
+}
+
+function isSharedBindSource(source: string): boolean {
+  return source.includes("${")
+    || source === ".."
+    || source.startsWith("../")
+    || source.startsWith("..\\")
+    || isAbsolute(source)
+    || source.startsWith("~")
+    || /^[A-Za-z]:[\\/]/.test(source);
+}
+
+function describeUnsupportedMount(value: unknown): string {
+  if (typeof value === "string" && !value.includes(":")) return `an anonymous volume at ${value}`;
+  if (isMap(value) && typeof value.type === "string") return `an unsupported ${value.type} mount`;
+  return "an unrecognized volume entry";
 }
 
 function samePort(left: PortBinding, right: PortBinding): boolean {
@@ -310,6 +427,25 @@ function samePort(left: PortBinding, right: PortBinding): boolean {
 
 function selectPostgresDataVolume(volumes: VolumeBinding[]): VolumeBinding | undefined {
   return volumes.find((volume) => volume.target.includes("postgres")) ?? volumes[0];
+}
+
+function selectMysqlDataVolume(volumes: VolumeBinding[]): VolumeBinding | undefined {
+  return volumes.find((volume) => volume.target.includes("mysql")) ?? volumes[0];
+}
+
+function withServiceArgument(
+  command: string | string[] | undefined,
+  prefix: string,
+  argument: string,
+): string | string[] {
+  if (Array.isArray(command)) return [...command.filter((item) => !item.startsWith(prefix)), argument];
+  if (command === undefined || command.trim() === "") return [argument];
+  const pattern = new RegExp(`${escapeRegExp(prefix)}\\S*`, "g");
+  return `${command.replace(pattern, "").trim()} ${argument}`.trim();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function isMap(value: unknown): value is UnknownMap {

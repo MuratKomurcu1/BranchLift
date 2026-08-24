@@ -3,7 +3,7 @@ import { performance } from "node:perf_hooks";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { volumeDirectoryName } from "./compose.js";
-import { cloneDirectory, repoDataRoot, snapshotRoot } from "./paths.js";
+import { cloneDirectory, copyDirectoryFull, repoDataRoot, snapshotRoot } from "./paths.js";
 import { readSnapshotMetadata } from "./state.js";
 import type { CopyStrategy, RepoInfo } from "./types.js";
 
@@ -12,30 +12,56 @@ export interface BenchmarkResult {
   iterations: number;
   logicalBytes: number;
   strategy: CopyStrategy;
-  samplesMs: number[];
-  medianMs: number;
-  p95Ms: number;
+  cloneSamplesMs: number[];
+  fullCopySamplesMs: number[];
+  cloneMedianMs: number;
+  cloneP95Ms: number;
+  fullCopyMedianMs: number;
+  speedup: number;
 }
 
 export async function benchmarkSnapshot(repo: RepoInfo, name: string, iterations: number): Promise<BenchmarkResult> {
   const snapshot = await readSnapshotMetadata(repo, name);
   const benchmarkRoot = join(repoDataRoot(repo), "benchmarks", randomUUID());
   await mkdir(benchmarkRoot, { recursive: true });
-  const samples: number[] = [];
+  const cloneSamples: number[] = [];
+  const fullCopySamples: number[] = [];
   let strategy: CopyStrategy = "empty";
 
   try {
     for (let index = 0; index < iterations; index += 1) {
-      const destinationRoot = join(benchmarkRoot, String(index));
-      await mkdir(destinationRoot, { recursive: true });
-      const started = performance.now();
-      for (const volume of snapshot.volumeNames) {
-        const source = join(snapshotRoot(repo, name), "volumes", volumeDirectoryName(volume));
-        const destination = join(destinationRoot, volumeDirectoryName(volume));
-        strategy = mergeStrategies(strategy, await cloneDirectory(source, destination));
+      const cloneRoot = join(benchmarkRoot, `${index}-clone`);
+      const copyRoot = join(benchmarkRoot, `${index}-full-copy`);
+      const runClone = async (): Promise<void> => {
+        await mkdir(cloneRoot, { recursive: true });
+        const started = performance.now();
+        for (const volume of snapshot.volumeNames) {
+          const source = join(snapshotRoot(repo, name), "volumes", volumeDirectoryName(volume));
+          const destination = join(cloneRoot, volumeDirectoryName(volume));
+          strategy = mergeStrategies(strategy, await cloneDirectory(source, destination));
+        }
+        cloneSamples.push(performance.now() - started);
+        await rm(cloneRoot, { recursive: true, force: true });
+      };
+      const runFullCopy = async (): Promise<void> => {
+        await mkdir(copyRoot, { recursive: true });
+        const started = performance.now();
+        for (const volume of snapshot.volumeNames) {
+          const source = join(snapshotRoot(repo, name), "volumes", volumeDirectoryName(volume));
+          const destination = join(copyRoot, volumeDirectoryName(volume));
+          await copyDirectoryFull(source, destination);
+        }
+        fullCopySamples.push(performance.now() - started);
+        await rm(copyRoot, { recursive: true, force: true });
+      };
+      // Alternate order to reduce warm-cache and first-run bias.
+      if (index % 2 === 0) {
+        await runFullCopy();
+        await runClone();
+      } else {
+        await runClone();
+        await runFullCopy();
       }
-      samples.push(performance.now() - started);
-      await rm(destinationRoot, { recursive: true, force: true });
     }
   } finally {
     const managedParent = resolve(repoDataRoot(repo), "benchmarks");
@@ -43,15 +69,21 @@ export async function benchmarkSnapshot(repo: RepoInfo, name: string, iterations
     if (resolved.startsWith(`${managedParent}/`)) await rm(resolved, { recursive: true, force: true });
   }
 
-  const sorted = [...samples].sort((left, right) => left - right);
+  const sortedClones = [...cloneSamples].sort((left, right) => left - right);
+  const sortedCopies = [...fullCopySamples].sort((left, right) => left - right);
+  const cloneMedianMs = percentile(sortedClones, 0.5);
+  const fullCopyMedianMs = percentile(sortedCopies, 0.5);
   return {
     snapshot: name,
     iterations,
     logicalBytes: snapshot.sizeBytes ?? 0,
     strategy,
-    samplesMs: samples.map(round),
-    medianMs: round(percentile(sorted, 0.5)),
-    p95Ms: round(percentile(sorted, 0.95)),
+    cloneSamplesMs: cloneSamples.map(round),
+    fullCopySamplesMs: fullCopySamples.map(round),
+    cloneMedianMs: round(cloneMedianMs),
+    cloneP95Ms: round(percentile(sortedClones, 0.95)),
+    fullCopyMedianMs: round(fullCopyMedianMs),
+    speedup: round(cloneMedianMs === 0 ? 0 : fullCopyMedianMs / cloneMedianMs),
   };
 }
 

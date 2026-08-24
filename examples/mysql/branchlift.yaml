@@ -1,0 +1,20 @@
+version: 1
+compose:
+  files:
+    - compose.yaml
+  statefulServices:
+    - mysql
+snapshot:
+  default: dev
+  healthTimeoutSeconds: 120
+  seed:
+    - service: mysql
+      command:
+        - mysql
+        - -uroot
+        - -pbranchlift
+        - --database=app
+        - --execute
+        - CREATE TABLE example (id integer PRIMARY KEY, value varchar(32)); INSERT INTO example VALUES (1, 'golden');
+worktree:
+  copyFiles: []

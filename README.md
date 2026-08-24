@@ -27,14 +27,15 @@ BranchLift prepares one stopped, immutable golden snapshot and clones its state 
 
 ## Current status
 
-This repository is an early **v0.5**. PostgreSQL 16 and Redis 7 are covered by a real Docker end-to-end test that creates isolated environments, attaches state to an existing worktree, rejects unsafe worktree removal, blocks concurrent lifecycle mutation, executes a context-aware child command, and recovers an abandoned snapshot build without discarding diagnostic state.
+**v1.0** covers PostgreSQL 16, MySQL 8.4 LTS, and Redis 7 in one real Docker end-to-end contract. The test creates two environments, mutates both SQL databases in one branch, proves the other branch remains at golden state, resets the changed branch, and verifies both databases again. It also covers attach ownership, lifecycle locking, context-aware child commands, and conservative crash recovery.
 
 Supported today:
 
-- Docker Compose v2;
+- Docker Compose 2.24.4+;
 - Git worktrees;
 - named-volume discovery and isolation;
 - PostgreSQL on macOS Docker Desktop and Linux;
+- MySQL 8.4 LTS on macOS Docker Desktop and Linux;
 - Redis and generic named volumes;
 - APFS clonefile and Linux reflink, with recursive-copy fallback;
 - arbitrary agent commands, including `codex` and `claude`;
@@ -45,12 +46,13 @@ Supported today:
 - context-aware host commands through `branchlift exec`;
 - crash recovery for abandoned snapshot builds and instance creation;
 - attachment to worktrees already created by Codex, Claude, an IDE, or the user.
+- pinned compatibility contracts for Langfuse, n8n Hosting, Docmost, Twenty, and Immich.
 
-MySQL, MongoDB, Kafka, MinIO, Windows, Podman, and live production imports are not yet claimed as production-ready.
+MongoDB, Kafka, MinIO, Windows, Podman, and live production imports are not yet claimed as production-ready. Generic named volumes are isolated, but a database-specific production claim requires its own crash-consistency E2E contract.
 
 ## Install from this checkout
 
-Requirements: Node.js 22+, Git, Docker, and Docker Compose v2.
+Requirements: Node.js 22+, Git, Docker, and Docker Compose 2.24.4+.
 
 ```bash
 npm install
@@ -60,18 +62,23 @@ npm install -g .
 branchlift --version
 ```
 
-Nothing is published automatically from this repository. A future npm release can use the same package and binary name.
+Ordinary pushes never publish. The release workflow is ready to publish the reviewed package with npm provenance when a GitHub Release is created; until the first release, install from this checkout or its tarball.
+
+See [docs/INSTALL.md](docs/INSTALL.md) for local, tarball, and future npm installation paths.
 
 ## Quick start
 
 Run this inside an existing Git repository containing `compose.yaml` or `docker-compose.yml`:
 
 ```bash
+branchlift init --dry-run
 branchlift init
 branchlift inspect
 ```
 
 `init` creates `branchlift.yaml`. Commit that file, then build the golden backend once:
+
+It automatically includes the standard `compose.override.yaml`/`docker-compose.override.yml` companion and copies only `.env`/`.env.local` files that actually exist. Use repeated `--compose` options for non-standard merge stacks.
 
 ```bash
 branchlift snapshot dev
@@ -169,7 +176,7 @@ The older `compose.file: compose.yaml` form remains readable.
 ## Commands
 
 ```text
-branchlift init [--compose FILE]...
+  branchlift init [--compose FILE]... [--dry-run] [--json]
 branchlift inspect [--json]
 branchlift snapshot [create] [NAME]
 branchlift snapshot list [--json]
@@ -211,7 +218,9 @@ BranchLift inspects Compose before mutating runtime state and refuses configurat
 - external named volumes;
 - detected stateful services without a managed named volume.
 
-Writable bind mounts are reported as warnings because they may share state across branches. `.env` is copied with owner-only permissions when it is absent from the worktree.
+Shared writable bind mounts are reported as warnings, or blockers when they belong to a stateful service. `.env` is copied with owner-only permissions when it is absent from the worktree.
+
+Diagnostics include a concrete recommendation for every isolation blocker. Interpolated or absolute bind sources are treated conservatively as shared. Generated overrides replace managed mount targets without deleting unrelated bind, tmpfs, secret, or config mounts from the source project.
 
 Mutating commands acquire owner-stamped filesystem locks. A conflicting command fails instead of racing database copies or Compose teardown. Agent and `exec` child processes run outside lifecycle locks so long-running tools do not prevent intentional runtime control.
 
@@ -241,11 +250,13 @@ Copy strategy order:
 
 Each reset clones into a never-before-mounted volume generation and switches the generated Compose override only after the clone validates. The previous generation is removed after the replacement stack becomes healthy. This avoids Docker Desktop bind-cache races and never exposes a half-copied reset as the active path.
 
-Measure the actual behavior on your machine:
+Measure clone latency against a forced full-copy baseline on your machine:
 
 ```bash
 branchlift benchmark dev --iterations 10
 ```
+
+For a database-independent, reproducible fixture use `npm run benchmark:synthetic -- --size-mib 256 --iterations 7`. Methodology and recorded evidence are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Development
 
@@ -254,9 +265,17 @@ npm install
 npm run check
 npm test
 
-# Requires a running Docker daemon and pulls postgres:16-alpine + redis:7-alpine
+# Requires a running Docker daemon and pulls postgres:16-alpine, mysql:8.4, and redis:7-alpine
 npm run test:e2e
+
+# Fetches five pinned public Compose projects
+npm run test:compat
+
+# Typecheck, unit tests, audit, and package dry-run
+npm run verify
 ```
+
+See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [CONTRIBUTING.md](CONTRIBUTING.md) for the exact support contract.
 
 The architecture is documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

@@ -23,7 +23,7 @@ import { createSnapshot } from "./snapshot.js";
 import { deleteSnapshot, listInstances, listSnapshots } from "./state.js";
 import type { ComposeInspection, InstanceMetadata } from "./types.js";
 
-const version = "0.5.0";
+const version = "1.0.0";
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const args = [...argv];
@@ -42,9 +42,16 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     switch (command) {
       case "init": {
         const composeFiles = takeOptions(args, "--compose");
+        const dryRun = takeFlag(args, "--dry-run");
+        const json = takeFlag(args, "--json");
         assertNoArgs(args);
-        const result = await initializeConfig(repo, composeFiles.length > 0 ? composeFiles : undefined);
-        console.log(`Created ${relative(repo.root, result.path)}.`);
+        const result = await initializeConfig(repo, composeFiles.length > 0 ? composeFiles : undefined, { write: !dryRun });
+        if (json) {
+          console.log(JSON.stringify({ written: result.written, path: result.path, config: result.config, inspection: result.inspection }, null, 2));
+          return result.inspection.blockers.length === 0 ? 0 : 2;
+        }
+        console.log(dryRun ? `Would create ${relative(repo.root, result.path)}:` : `Created ${relative(repo.root, result.path)}.`);
+        if (dryRun) console.log(`\n${JSON.stringify(result.config, null, 2)}\n`);
         printInspection(result.inspection);
         if (result.inspection.blockers.length > 0) {
           console.log("\nFix the blockers above before creating a snapshot.");
@@ -238,9 +245,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         if (json) console.log(JSON.stringify(result, null, 2));
         else {
           console.log(`Snapshot: ${result.snapshot} (${humanBytes(result.logicalBytes)} logical)`);
-          console.log(`Copy strategy: ${result.strategy}`);
-          console.log(`Median: ${result.medianMs} ms`);
-          console.log(`p95: ${result.p95Ms} ms (${result.iterations} iterations)`);
+          console.log(`Clone strategy: ${result.strategy}`);
+          console.log(`Clone median: ${result.cloneMedianMs} ms`);
+          console.log(`Clone p95: ${result.cloneP95Ms} ms (${result.iterations} iterations)`);
+          console.log(`Full-copy median: ${result.fullCopyMedianMs} ms`);
+          console.log(`Median speedup: ${result.speedup}x`);
         }
         return 0;
       }
@@ -269,6 +278,7 @@ function printInspection(inspection: ComposeInspection): void {
   console.log(`Published ports: ${inspection.ports.length}`);
   inspection.warnings.forEach((warning) => console.log(`warning: ${warning}`));
   inspection.blockers.forEach((blocker) => console.log(`blocker: ${blocker}`));
+  inspection.recommendations.forEach((recommendation) => console.log(`recommendation: ${recommendation}`));
   if (inspection.warnings.length === 0 && inspection.blockers.length === 0) console.log("Isolation check: clean");
 }
 
@@ -329,6 +339,7 @@ function printDoctor(
   );
   inspection.warnings.forEach((warning) => console.log(`warning: ${warning}`));
   inspection.blockers.forEach((blocker) => console.log(`blocker: ${blocker}`));
+  inspection.recommendations.forEach((recommendation) => console.log(`recommendation: ${recommendation}`));
   report.findings.forEach((finding) => {
     console.log(`${finding.severity}: [${finding.code}] ${finding.message}${finding.fixable ? " (fixable)" : ""}`);
   });
@@ -391,7 +402,7 @@ function printHelp(): void {
   console.log(`BranchLift ${version} — stateful backend environments for parallel coding agents
 
 Usage:
-  branchlift init [--compose FILE]...
+  branchlift init [--compose FILE]... [--dry-run] [--json]
   branchlift inspect [--json]
   branchlift snapshot [create] [NAME]
   branchlift snapshot list [--json]

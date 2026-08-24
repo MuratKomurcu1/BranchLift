@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { cp, mkdir, open, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { BranchLiftError } from "./errors.js";
@@ -88,6 +88,7 @@ export async function cloneDirectory(source: string, destination: string): Promi
   if (process.platform === "darwin") {
     const result = await runCommand("cp", ["-cR", `${source}/.`, destination], { allowFailure: true });
     if (result.exitCode === 0) return "apfs-clone";
+    await resetCopyDestination(destination);
   }
 
   if (process.platform === "linux") {
@@ -95,10 +96,39 @@ export async function cloneDirectory(source: string, destination: string): Promi
       allowFailure: true,
     });
     if (result.exitCode === 0) return "linux-reflink";
+    await resetCopyDestination(destination);
   }
 
-  await cp(source, destination, { recursive: true, force: false, errorOnExist: true });
+  await copyDirectoryEntries(source, destination, entries);
   return "recursive-copy";
+}
+
+export async function copyDirectoryFull(source: string, destination: string): Promise<void> {
+  await mkdir(destination, { recursive: true });
+  const entries = await readdir(source);
+  if (entries.length === 0) return;
+
+  if (process.platform === "darwin") {
+    await runCommand("cp", ["-R", `${source}/.`, destination]);
+    return;
+  }
+  if (process.platform === "linux") {
+    const result = await runCommand("cp", ["-a", "--reflink=never", `${source}/.`, destination], { allowFailure: true });
+    if (result.exitCode === 0) return;
+    await resetCopyDestination(destination);
+  }
+  await copyDirectoryEntries(source, destination, entries);
+}
+
+async function copyDirectoryEntries(source: string, destination: string, entries: string[]): Promise<void> {
+  for (const entry of entries) {
+    await cp(join(source, entry), join(destination, entry), { recursive: true, force: false, errorOnExist: true });
+  }
+}
+
+async function resetCopyDestination(destination: string): Promise<void> {
+  await rm(destination, { recursive: true, force: true });
+  await mkdir(destination, { recursive: true });
 }
 
 export async function directorySize(path: string): Promise<number> {

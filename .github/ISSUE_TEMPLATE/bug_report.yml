@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a reproducible BranchLift failure
+title: "[bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Include the relevant Compose and branchlift.yaml fragments with secrets removed.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Diagnostics
+      description: Paste branchlift doctor --json and docker compose version output.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: macOS 15 / Ubuntu 24.04, filesystem, Docker version
+    validations:
+      required: true

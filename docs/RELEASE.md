@@ -1,0 +1,11 @@
+# Release procedure
+
+1. Run `npm ci`, `npm run verify`, `npm run test:compat`, and `npm run test:e2e`.
+2. Confirm `package.json`, `package-lock.json`, and the CLI report the same version.
+3. Inspect `npm pack --dry-run`; no runtime state, env file, fixture database, or credentials may be present.
+4. Update user-facing release notes and compatibility pins when needed.
+5. Tag the exact reviewed commit as `vX.Y.Z` and publish a GitHub Release.
+6. The release workflow repeats verification on Ubuntu, runs Docker E2E, and publishes to npm with provenance.
+7. Install the published tarball in a clean directory and run `branchlift --version` plus `branchlift help`.
+
+Ordinary pushes and pull requests never publish. A failed release job must be fixed with a new version; do not replace an npm artifact.

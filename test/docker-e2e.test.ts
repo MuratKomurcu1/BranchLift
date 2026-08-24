@@ -41,6 +41,7 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     assert.equal(attached.worktreeOwner, "external");
     assert.equal(await realpath(attached.worktreePath), await realpath(root));
     assert.equal(await probe(attached, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
+    assert.equal(await mysqlProbe(attached, "SELECT value FROM branchlift_mysql_probe WHERE id = 1"), "golden");
     const removeAttachedWorktree = await runCommand(
       process.execPath,
       [cli, "destroy", "main", "--worktree"],
@@ -49,12 +50,14 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     assert.equal(removeAttachedWorktree.exitCode, 1);
     assert.match(removeAttachedWorktree.stderr, /externally owned worktree/);
     assert.equal(await probe(attached, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
+    assert.equal(await mysqlProbe(attached, "SELECT value FROM branchlift_mysql_probe WHERE id = 1"), "golden");
     await run(process.execPath, [cli, "destroy", "main"], root, env);
     assert.match(await readFile(join(root, "compose.yaml"), "utf8"), /postgres/);
 
     const first = JSON.parse(await run(process.execPath, [cli, "spawn", "agent-a", "--json"], root, env)) as InstanceMetadata;
     assert.ok(first.volumeRoot);
     assert.equal(await probe(first, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
+    assert.equal(await mysqlProbe(first, "SELECT value FROM branchlift_mysql_probe WHERE id = 1"), "golden");
 
     await run(
       process.execPath,
@@ -106,11 +109,15 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     activeLockPath = undefined;
 
     await sql(first, "UPDATE branchlift_probe SET value = 'changed' WHERE id = 1");
+    await mysqlSql(first, "UPDATE branchlift_mysql_probe SET value = 'changed' WHERE id = 1");
     assert.equal(await probe(first, "SELECT value FROM branchlift_probe WHERE id = 1"), "changed");
+    assert.equal(await mysqlProbe(first, "SELECT value FROM branchlift_mysql_probe WHERE id = 1"), "changed");
 
     const second = JSON.parse(await run(process.execPath, [cli, "spawn", "agent-b", "--json"], root, env)) as InstanceMetadata;
     assert.equal(await probe(second, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
+    assert.equal(await mysqlProbe(second, "SELECT value FROM branchlift_mysql_probe WHERE id = 1"), "golden");
     assert.notEqual(first.ports.find((port) => port.service === "postgres")?.port, second.ports.find((port) => port.service === "postgres")?.port);
+    assert.notEqual(first.ports.find((port) => port.service === "mysql")?.port, second.ports.find((port) => port.service === "mysql")?.port);
 
     const deleteUsedSnapshot = await runCommand(process.execPath, [cli, "snapshot", "delete", "dev"], {
       cwd: root,
@@ -190,6 +197,7 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     await assert.rejects(readdir(first.volumeRoot), /ENOENT/);
     await assert.rejects(readFile(first.overrideFile, "utf8"), /ENOENT/);
     assert.equal(await probe(resetFirst, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
+    assert.equal(await mysqlProbe(resetFirst, "SELECT value FROM branchlift_mysql_probe WHERE id = 1"), "golden");
 
     await run(process.execPath, [cli, "destroy", "agent-a", "--worktree"], root, env);
     await run(process.execPath, [cli, "destroy", "agent-b", "--worktree"], root, env);
@@ -252,6 +260,38 @@ async function sql(instance: InstanceMetadata, query: string): Promise<string> {
   return result.stdout;
 }
 
+async function mysqlProbe(instance: InstanceMetadata, query: string): Promise<string> {
+  return (await mysqlSql(instance, query)).trim();
+}
+
+async function mysqlSql(instance: InstanceMetadata, query: string): Promise<string> {
+  const composeFiles = (instance.composeFiles ?? [instance.composeFile]).flatMap((file) => ["-f", join(instance.worktreePath, file)]);
+  const result = await runCommand(
+    "docker",
+    [
+      "compose",
+      ...composeFiles,
+      "-f",
+      instance.overrideFile,
+      "-p",
+      instance.composeProject,
+      "exec",
+      "-T",
+      "mysql",
+      "mysql",
+      "-uroot",
+      "-pbranchlift",
+      "--database=branchlift",
+      "--batch",
+      "--skip-column-names",
+      "--execute",
+      query,
+    ],
+    { cwd: instance.worktreePath },
+  );
+  return result.stdout;
+}
+
 async function run(command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
   const result = await runCommand(command, args, { cwd, env });
   return result.stdout;
@@ -279,9 +319,22 @@ function composeFixture(): string {
       retries: 40
     volumes:
       - redisdata:/data
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: branchlift
+      MYSQL_DATABASE: branchlift
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -pbranchlift --silent"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+    volumes:
+      - mysqldata:/var/lib/mysql
 volumes:
   pgdata: {}
   redisdata: {}
+  mysqldata: {}
 `;
 }
 
@@ -293,6 +346,9 @@ function composeDevFixture(): string {
   redis:
     ports:
       - "6379:6379"
+  mysql:
+    ports:
+      - "3306:3306"
 `;
 }
 
@@ -305,6 +361,7 @@ compose:
   statefulServices:
     - postgres
     - redis
+    - mysql
 snapshot:
   default: dev
   healthTimeoutSeconds: 120
@@ -316,6 +373,14 @@ snapshot:
         - postgres
         - -c
         - CREATE TABLE branchlift_probe (id integer PRIMARY KEY, value text NOT NULL); INSERT INTO branchlift_probe VALUES (1, 'golden');
+    - service: mysql
+      command:
+        - mysql
+        - -uroot
+        - -pbranchlift
+        - --database=branchlift
+        - --execute
+        - CREATE TABLE branchlift_mysql_probe (id integer PRIMARY KEY, value varchar(32) NOT NULL); INSERT INTO branchlift_mysql_probe VALUES (1, 'golden');
 worktree:
   copyFiles: []
 `;

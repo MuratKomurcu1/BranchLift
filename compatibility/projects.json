@@ -1,0 +1,47 @@
+[
+  {
+    "name": "Langfuse",
+    "repo": "langfuse/langfuse",
+    "commit": "ea3c905cd535fb7d54c008ed8ea89d6f3ba684b9",
+    "path": "docker-compose.yml",
+    "expected": "compatible",
+    "services": ["clickhouse", "minio", "postgres", "redis"],
+    "volumes": ["langfuse_clickhouse_data", "langfuse_minio_data", "langfuse_postgres_data"]
+  },
+  {
+    "name": "n8n Hosting",
+    "repo": "n8n-io/n8n-hosting",
+    "commit": "6b78193475d84ae190622d8a8e9ba8598e89b7d1",
+    "path": "docker-compose/withPostgres/docker-compose.yml",
+    "expected": "compatible",
+    "services": ["n8n", "postgres"],
+    "volumes": ["db_storage", "n8n_storage"]
+  },
+  {
+    "name": "Docmost",
+    "repo": "docmost/docmost",
+    "commit": "cd597f0161ab0221cae912cd9f8f71e2da6e607d",
+    "path": "docker-compose.yml",
+    "expected": "compatible",
+    "services": ["db", "docmost", "redis"],
+    "volumes": ["db_data", "docmost", "redis_data"]
+  },
+  {
+    "name": "Twenty",
+    "repo": "twentyhq/twenty",
+    "commit": "cbd58da103f38264ef6ad1bff38b4d2d62ce298e",
+    "path": "packages/twenty-docker/docker-compose.yml",
+    "expected": "diagnosed",
+    "services": ["db", "redis", "server", "worker"],
+    "blockers": ["Stateful service redis has no managed named volume"]
+  },
+  {
+    "name": "Immich",
+    "repo": "immich-app/immich",
+    "commit": "8dcfd36fa579925d205719a92516b4be7b8c2e6d",
+    "path": "docker/docker-compose.yml",
+    "expected": "diagnosed",
+    "services": ["database", "immich-machine-learning", "immich-server", "redis"],
+    "blockers": ["sets container_name", "Stateful service redis has no managed named volume"]
+  }
+]

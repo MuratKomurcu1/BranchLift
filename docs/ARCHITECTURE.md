@@ -25,11 +25,13 @@ The inspector parses a single Compose file directly. For multiple files it asks 
 - bind mounts;
 - published container ports;
 - stateful services inferred from names and images;
-- isolation blockers and warnings.
+- isolation blockers, warnings, and actionable recommendations.
 
-Source Compose files are never rewritten. BranchLift generates an additional final override using Compose's `!override` tag. Named volumes become host-managed bind mounts and published ports omit a fixed host port so Docker assigns collision-free ports.
+Source Compose files are never rewritten. BranchLift generates an additional final override. Managed volume targets are replaced through Compose's unique-resource merge rules, preserving unrelated bind, tmpfs, secret, and config mounts. Ports use Compose's `!override` tag and omit fixed host ports so Docker assigns collision-free ports.
 
-PostgreSQL receives a nested `PGDATA` directory. On macOS, initial snapshot bootstrap runs in a temporary Docker-native volume and exports the cleanly stopped data as host-owned files; cloned instances then use the invoking host UID/GID for the container and socket tmpfs. This avoids Docker Desktop bind ownership races while preserving APFS cloning for normal spawn and reset operations. Other platforms bootstrap directly in the host-managed snapshot path and keep the image's declared user.
+PostgreSQL receives a nested `PGDATA` directory. On macOS and Linux, initial snapshot bootstrap runs in a temporary Docker-native volume and exports the cleanly stopped data as host-owned files; cloned instances then use the invoking non-root UID/GID for the container and socket tmpfs. This avoids bind ownership races while preserving APFS/reflink cloning for normal spawn and reset operations.
+
+MySQL uses the same native-volume bootstrap/export path. Both bootstrap and cloned instances use `lower_case_table_names=1`, because that value is valid on case-sensitive and case-insensitive filesystems and the setting must match the initialized data dictionary.
 
 ## Snapshot consistency
 
@@ -67,7 +69,7 @@ The copy layer prefers native filesystem clones:
 - Linux Btrfs/XFS: GNU `cp -a --reflink=always`;
 - other filesystems: Node recursive copy.
 
-The fallback remains correct but loses the speed and disk-efficiency advantage. `branchlift benchmark` exposes the selected strategy and measured latency.
+The fallback remains correct but loses the speed and disk-efficiency advantage. `branchlift benchmark` alternates clone and forced full-copy order, reports both sample sets, and calculates median speedup.
 
 ## Crash behavior
 
