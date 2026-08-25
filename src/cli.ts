@@ -1168,6 +1168,7 @@ async function ensureRemoteReady(repo: RepoInfo, name: string): Promise<void> {
 
 function errorText(error: unknown): string {
   if (error instanceof BranchLiftError) return [error.message, error.hint].filter(Boolean).join(" ");
+  if (error instanceof Error && error.stack) return error.stack;
   return error instanceof Error ? error.message : String(error);
 }
 
