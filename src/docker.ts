@@ -66,6 +66,9 @@ export async function composeUp(
   volumeRoot?: string,
 ): Promise<void> {
   try {
+    if (volumeRoot !== undefined && managedVolumes.length > 0) {
+      await prepareRuntimeStateOwnership(runtime, managedVolumes, volumeRoot, quiet);
+    }
     await runCommand(
       "docker",
       [...composeArgs(runtime), "up", "-d", "--wait", "--wait-timeout", String(timeoutSeconds)],
@@ -83,6 +86,26 @@ export async function composeUp(
       "Compose stack failed to become healthy.",
       detail !== "" ? detail : error instanceof Error ? error.message : String(error),
     );
+  }
+}
+
+async function prepareRuntimeStateOwnership(
+  runtime: ComposeRuntime,
+  volumes: VolumeBinding[],
+  volumeRoot: string,
+  quiet: boolean,
+): Promise<void> {
+  await runCommand("docker", [...composeArgs(runtime), "create"], {
+    cwd: runtime.cwd,
+    stdio: quiet ? "capture" : "inherit",
+  });
+  const unique = new Map(volumes.map((volume) => [`${volume.service}\0${volume.target}`, volume]));
+  const helperImages = await runtimeStateHelperImages(runtime, [...unique.values()].map(({ service }) => service));
+  for (const volume of unique.values()) {
+    if (volume.readOnly) continue;
+    const owner = await runtimeServiceOwner(runtime, volume.service);
+    if (owner === undefined || owner === "0" || owner.startsWith("0:")) continue;
+    await chownRuntimeDirectory(runtime, helperImages, join(volumeRoot, volumeDirectoryName(volume.source)), owner);
   }
 }
 
@@ -105,31 +128,56 @@ export async function normalizeRuntimeStateOwnership(
     if (direct.exitCode === 0 || volumeRoot === undefined) continue;
     helperImages ??= await runtimeStateHelperImages(runtime, [...unique.values()].map(({ service }) => service));
     const source = join(volumeRoot, volumeDirectoryName(volume.source));
-    for (const image of helperImages) {
-      const fallback = await runCommand(
-        "docker",
-        [
-          "run",
-          "--rm",
-          "--network",
-          "none",
-          "--read-only",
-          "--user",
-          "0",
-          "--entrypoint",
-          "chown",
-          "--mount",
-          `type=bind,src=${source},dst=/branchlift-state`,
-          image,
-          "-R",
-          owner,
-          "/branchlift-state",
-        ],
-        { cwd: runtime.cwd, allowFailure: true },
-      );
-      if (fallback.exitCode === 0) break;
-    }
+    await chownRuntimeDirectory(runtime, helperImages, source, owner);
   }
+}
+
+async function runtimeServiceOwner(runtime: ComposeRuntime, service: string): Promise<string | undefined> {
+  const containers = await runCommand("docker", [...composeArgs(runtime), "ps", "--all", "--quiet", service], {
+    cwd: runtime.cwd,
+    allowFailure: true,
+  });
+  const container = containers.stdout.split("\n").map((value) => value.trim()).find(Boolean);
+  if (container === undefined) return undefined;
+  const inspected = await runCommand("docker", ["inspect", "--format", "{{.Config.User}}", container], {
+    cwd: runtime.cwd,
+    allowFailure: true,
+  });
+  const owner = inspected.stdout.trim();
+  return inspected.exitCode === 0 && /^\d+(?::\d+)?$/.test(owner) ? owner : undefined;
+}
+
+async function chownRuntimeDirectory(
+  runtime: ComposeRuntime,
+  helperImages: string[],
+  source: string,
+  owner: string,
+): Promise<boolean> {
+  for (const image of helperImages) {
+    const result = await runCommand(
+      "docker",
+      [
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--user",
+        "0",
+        "--entrypoint",
+        "chown",
+        "--mount",
+        `type=bind,src=${source},dst=/branchlift-state`,
+        image,
+        "-R",
+        owner,
+        "/branchlift-state",
+      ],
+      { cwd: runtime.cwd, allowFailure: true },
+    );
+    if (result.exitCode === 0) return true;
+  }
+  return false;
 }
 
 async function runtimeStateHelperImages(runtime: ComposeRuntime, services: string[]): Promise<string[]> {
