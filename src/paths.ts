@@ -101,7 +101,7 @@ export async function cloneDirectory(source: string, destination: string): Promi
   }
 
   if (process.platform === "linux") {
-    const result = await runCommand("cp", ["-a", "--reflink=always", `${source}/.`, destination], {
+    const result = await runCommand("cp", ["-a", "--no-preserve=ownership", "--reflink=always", `${source}/.`, destination], {
       allowFailure: true,
     });
     if (result.exitCode === 0) return "linux-reflink";
@@ -122,7 +122,7 @@ export async function copyDirectoryFull(source: string, destination: string): Pr
     return;
   }
   if (process.platform === "linux") {
-    const result = await runCommand("cp", ["-a", "--reflink=never", `${source}/.`, destination], { allowFailure: true });
+    const result = await runCommand("cp", ["-a", "--no-preserve=ownership", "--reflink=never", `${source}/.`, destination], { allowFailure: true });
     if (result.exitCode === 0) return;
     await resetCopyDestination(destination);
   }
@@ -153,14 +153,11 @@ async function copyDirectoryEntries(source: string, destination: string, entries
 }
 
 async function resetCopyDestination(destination: string): Promise<void> {
-  try {
-    await rm(destination, { recursive: true, force: true });
-  } catch (error) {
-    if (process.env.BRANCHLIFT_DEBUG === "1") {
-      process.stderr.write(`[branchlift-debug] resetCopyDestination failed for ${destination}\n${error instanceof Error ? error.stack : String(error)}\n`);
-    }
-    throw error;
-  }
+  // GNU cp applies archived directory modes before it knows whether every
+  // reflink can be created. A failed attempt can therefore leave a partial,
+  // host-owned but read-only tree that Node cannot recursively remove.
+  await makeTreeOwnerWritable(destination);
+  await rm(destination, { recursive: true, force: true });
   await mkdir(destination, { recursive: true });
 }
 

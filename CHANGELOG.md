@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.1
+
+- Fix Linux fallback cloning from immutable snapshots on filesystems without reflink support: partial GNU `cp` trees are made owner-writable before cleanup, clone ownership stays with the invoking user, and database-owned instance trees are reclaimed before destroy.
+
 ## 1.3.0
 
 - Fix Linux cleanup of stateful instances: ownership of managed volume trees is reclaimed through a privileged helper container before deletion, so database entrypoints that reown bind-mounted files (for example MySQL's `#innodb_redo`) no longer cause `EACCES` during destroy or generation replacement.
