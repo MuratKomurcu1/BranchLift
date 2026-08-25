@@ -36,7 +36,7 @@ For an equivalent local run on Btrfs or reflink-capable XFS:
 npm run benchmark:synthetic -- --size-mib 512 --iterations 7
 ```
 
-The public Linux run on 2026-08-25 selected `linux-reflink` for a 512 MiB fixture. Its median clone was 31.25 ms versus 600.95 ms for forced full copy, a 19.23× median speedup. The seven raw samples, including the full-copy outlier, are retained in [`benchmarks/linux-btrfs-x64-2026-08-25.json`](../benchmarks/linux-btrfs-x64-2026-08-25.json), and the independently reproducible run is [GitHub Actions #32796967662](https://github.com/muratkomurcu/BranchLift/actions/runs/32796967662).
+The public Linux run on 2026-08-25 selected `linux-reflink` for a 512 MiB fixture. Its median clone was 31.25 ms versus 600.95 ms for forced full copy, a 19.23× median speedup. The seven raw samples, including the full-copy outlier, are retained in [`benchmarks/linux-btrfs-x64-2026-08-25.json`](../benchmarks/linux-btrfs-x64-2026-08-25.json), and the independently reproducible run is [GitHub Actions #32796967662](https://github.com/MuratKomurcu1/BranchLift/actions/runs/32796967662).
 
 ## Real-project lifecycle evidence
 

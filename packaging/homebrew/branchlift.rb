@@ -1,7 +1,7 @@
 class Branchlift < Formula
   desc "Stateful backend environments for parallel coding agents"
-  homepage "https://github.com/muratkomurcu/BranchLift"
-  url "https://github.com/muratkomurcu/BranchLift/releases/download/v1.1.0/branchlift-1.1.0.tgz"
+  homepage "https://github.com/MuratKomurcu1/BranchLift"
+  url "https://github.com/MuratKomurcu1/BranchLift/releases/download/v1.1.0/branchlift-1.1.0.tgz"
   sha256 "b1b3f153510b112106f0d1f07eef983a91e1249e461dd33740b2e36fbd5c3128"
   license "Apache-2.0"
 

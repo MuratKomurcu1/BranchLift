@@ -2,13 +2,13 @@
   "name": "branchlift",
   "version": "1.2.0",
   "description": "Stateful backend environments for parallel coding agents and git worktrees.",
-  "homepage": "https://github.com/muratkomurcu/BranchLift#readme",
+  "homepage": "https://github.com/MuratKomurcu1/BranchLift#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/muratkomurcu/BranchLift.git"
+    "url": "git+https://github.com/MuratKomurcu1/BranchLift.git"
   },
   "bugs": {
-    "url": "https://github.com/muratkomurcu/BranchLift/issues"
+    "url": "https://github.com/MuratKomurcu1/BranchLift/issues"
   },
   "type": "module",
   "bin": {

@@ -63,11 +63,11 @@ MongoDB, Kafka, Windows, and Podman are not yet claimed as production-ready. Exi
 Requirements: Node.js 22+, Git, Docker, and Docker Compose 2.24.4+.
 
 ```bash
-npm install -g https://github.com/muratkomurcu/BranchLift/releases/download/v1.2.0/branchlift-1.2.0.tgz
+npm install -g https://github.com/MuratKomurcu1/BranchLift/releases/download/v1.2.0/branchlift-1.2.0.tgz
 
 # or
-brew tap muratkomurcu/tap
-brew trust --formula muratkomurcu/tap/branchlift
+brew tap MuratKomurcu1/tap
+brew trust --formula MuratKomurcu1/tap/branchlift
 brew install branchlift
 ```
 
