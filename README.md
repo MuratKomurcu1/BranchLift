@@ -1,15 +1,15 @@
 # BranchLift
 
-**Lift a full backend into every worktree.**
+**Git for your AI agents' backend state.**
 
 [![CI](https://github.com/MuratKomurcu1/BranchLift/actions/workflows/ci.yml/badge.svg)](https://github.com/MuratKomurcu1/BranchLift/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/branchlift)](https://www.npmjs.com/package/branchlift)
 [![Homebrew](https://img.shields.io/badge/Homebrew-tap-orange)](https://github.com/MuratKomurcu1/homebrew-tap)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-BranchLift gives parallel coding agents isolated, stateful backend environments. Git worktrees separate source files; BranchLift also separates PostgreSQL, MySQL, MongoDB, Redis, Kafka, other Compose volumes, networks, and published ports. Its control plane adds immutable state lineage, a least-privilege agent sandbox, prompt-to-diff Kanban, scoped secret injection, SSH workers, role-based team access, a local UI, audit events, and MCP tools.
+Git worktrees isolate code. BranchLift isolates **and versions** the PostgreSQL, MySQL, MongoDB, Redis, Kafka, and Docker Compose state behind every parallel coding agent.
 
-![BranchLift's local macOS-style workspace showing five prompt-to-diff Kanban lanes for Codex, Claude, and Cursor](docs/assets/branchlift-workspace.jpg)
+Each agent gets a real backend it can mutate without colliding with another agent. That state can be committed as an immutable child snapshot, diffed, reset, or moved to a machine you already control.
 
 ![BranchLift turns one immutable backend snapshot into isolated state for three parallel coding agents, then resets mutations to golden state](docs/assets/branchlift-state-proof.svg)
 
@@ -20,7 +20,40 @@ main snapshot
 └── agent/migration     → isolated worktree + PostgreSQL + Redis + ports
 ```
 
-It is local-first, agent-agnostic, self-hosted, and has no BranchLift account, hosted service, or paid dependency.
+BranchLift is local-first, agent-agnostic, self-hosted, and requires no BranchLift account, hosted service, or paid dependency.
+
+## Prove the isolation in five minutes
+
+The built-in demo uses real PostgreSQL 16 and Redis 7 containers. These commands create two environments from the same golden snapshot, mutate only one database, preserve that mutation as a child snapshot, show the state diff, and reset the environment:
+
+```bash
+branchlift demo
+cd branchlift-demo
+
+# A second agent starts from the same immutable dev snapshot.
+branchlift spawn agent/review --snapshot dev
+
+# Mutate only agent/demo's PostgreSQL state.
+branchlift exec agent/demo -- docker compose exec -T postgres \
+  psql -U branchlift -d app -c "CREATE TABLE agent_demo (id integer PRIMARY KEY);"
+
+# This prints an empty line: agent/review never sees agent/demo's table.
+branchlift exec agent/review -- docker compose exec -T postgres \
+  psql -U branchlift -d app -tAc "SELECT to_regclass('public.agent_demo');"
+
+# Version the changed backend, inspect it, then restore golden state.
+branchlift snapshot commit demo-mutated --from agent/demo
+branchlift snapshot diff dev demo-mutated
+branchlift reset agent/demo
+```
+
+This is the core contract: **isolate → mutate → commit → diff → reset**. The same lifecycle is exercised in public Linux CI against pinned Docmost, n8n, and Langfuse stacks; see [the evidence contract](docs/EVIDENCE.md).
+
+## Local control plane
+
+The optional loopback-only UI keeps environments, immutable state lineage, security posture, remotes, audit events, and bounded agent-task review in one place.
+
+![BranchLift's local macOS-style workspace showing five prompt-to-diff Kanban lanes for Codex, Claude, and Cursor](docs/assets/branchlift-workspace.jpg)
 
 ## Where BranchLift fits
 

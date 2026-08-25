@@ -1,7 +1,7 @@
 {
   "name": "branchlift",
   "version": "1.4.0",
-  "description": "Stateful backend environments for parallel coding agents and git worktrees.",
+  "description": "Versioned backend state for parallel AI coding agents and Git worktrees.",
   "homepage": "https://github.com/MuratKomurcu1/BranchLift#readme",
   "repository": {
     "type": "git",
@@ -43,9 +43,14 @@
   },
   "keywords": [
     "ai-agents",
+    "coding-agents",
+    "codex",
+    "claude-code",
     "git-worktree",
     "docker-compose",
     "database-branching",
+    "database-snapshots",
+    "state-isolation",
     "development-environments"
   ],
   "license": "Apache-2.0",

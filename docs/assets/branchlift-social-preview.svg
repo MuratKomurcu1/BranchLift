@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title description">
+  <title id="title">BranchLift — Git for your AI agents' backend state</title>
+  <desc id="description">An immutable backend snapshot branches into isolated state for two parallel coding agents.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#090c13"/>
+      <stop offset="0.55" stop-color="#111827"/>
+      <stop offset="1" stop-color="#0a111d"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#79a8ff"/>
+      <stop offset="1" stop-color="#356df3"/>
+    </linearGradient>
+    <linearGradient id="green" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#72e2ad"/>
+      <stop offset="1" stop-color="#1ea66a"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop stop-color="#477eff" stop-opacity=".27"/>
+      <stop offset="1" stop-color="#477eff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#000" flood-opacity=".4"/>
+    </filter>
+    <style>
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    </style>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#background)"/>
+  <circle cx="1030" cy="116" r="390" fill="url(#glow)"/>
+  <circle cx="90" cy="640" r="280" fill="#23b777" opacity=".06"/>
+  <path d="M0 96H1280M0 560H1280" stroke="#fff" stroke-opacity=".035"/>
+
+  <g class="sans" transform="translate(64 54)">
+    <rect width="48" height="48" rx="14" fill="url(#brand)" filter="url(#shadow)"/>
+    <text x="24" y="31" text-anchor="middle" fill="#fff" font-size="13" font-weight="800">BL</text>
+    <text x="64" y="31" fill="#f4f7fc" font-size="21" font-weight="760">BranchLift</text>
+  </g>
+
+  <g class="sans" transform="translate(64 162)">
+    <text x="0" y="0" fill="#f7f9fd" font-size="45" font-weight="760" letter-spacing="-1.7">Git for your AI agents'</text>
+    <text x="0" y="55" fill="#f7f9fd" font-size="45" font-weight="760" letter-spacing="-1.7">backend state.</text>
+    <text x="0" y="121" fill="#9ca8bb" font-size="19">Git worktrees isolate code. BranchLift isolates and versions</text>
+    <text x="0" y="150" fill="#9ca8bb" font-size="19">the databases, queues, caches, volumes, networks, and ports.</text>
+
+    <g transform="translate(0 200)">
+      <rect width="135" height="42" rx="21" fill="#16243e" stroke="#34558c"/>
+      <text x="67.5" y="27" text-anchor="middle" fill="#94b8ff" font-size="13" font-weight="700">ISOLATE</text>
+      <rect x="147" width="124" height="42" rx="21" fill="#16243e" stroke="#34558c"/>
+      <text x="209" y="27" text-anchor="middle" fill="#94b8ff" font-size="13" font-weight="700">COMMIT</text>
+      <rect x="283" width="104" height="42" rx="21" fill="#16243e" stroke="#34558c"/>
+      <text x="335" y="27" text-anchor="middle" fill="#94b8ff" font-size="13" font-weight="700">DIFF</text>
+      <rect x="399" width="118" height="42" rx="21" fill="#152a21" stroke="#2f7355"/>
+      <text x="458" y="27" text-anchor="middle" fill="#73dfad" font-size="13" font-weight="700">RESET</text>
+    </g>
+
+    <text x="0" y="304" fill="#707e93" font-size="14" font-weight="650">LOCAL-FIRST · OPEN SOURCE · NO HOSTED ACCOUNT</text>
+  </g>
+
+  <g transform="translate(760 134)" filter="url(#shadow)">
+    <rect width="456" height="378" rx="25" fill="#151b26" stroke="#334158"/>
+    <rect x="1" y="1" width="454" height="54" rx="24" fill="#1b2230"/>
+    <circle cx="25" cy="27" r="6" fill="#ff5f57"/>
+    <circle cx="45" cy="27" r="6" fill="#febc2e"/>
+    <circle cx="65" cy="27" r="6" fill="#28c840"/>
+    <text class="sans" x="91" y="32" fill="#aeb8c8" font-size="12" font-weight="650">VERSIONED BACKEND STATE</text>
+
+    <g class="sans" transform="translate(32 83)">
+      <rect width="168" height="86" rx="15" fill="#121722" stroke="#3b5683"/>
+      <rect x="16" y="17" width="38" height="38" rx="11" fill="url(#brand)"/>
+      <path d="M27 29h16v13H27zM30 26h10v5H30z" fill="none" stroke="#fff" stroke-width="1.8"/>
+      <text x="67" y="34" fill="#f0f4fa" font-size="15" font-weight="720">dev</text>
+      <text x="67" y="53" fill="#8390a4" font-size="10">immutable snapshot</text>
+      <rect x="112" y="15" width="40" height="20" rx="10" fill="#152a21"/>
+      <text x="132" y="29" text-anchor="middle" fill="#68dca5" font-size="9" font-weight="700">CLEAN</text>
+    </g>
+
+    <path d="M200 126H234M234 126V217M234 126V316M234 217H258M234 316H258" stroke="#49658e" stroke-width="2.5" fill="none"/>
+    <circle cx="234" cy="126" r="5" fill="#6997e8"/>
+
+    <g class="sans" transform="translate(258 177)">
+      <rect width="166" height="82" rx="15" fill="#121722" stroke="#355179"/>
+      <circle cx="25" cy="26" r="9" fill="#4b82e7"/>
+      <text x="44" y="31" fill="#f0f4fa" font-size="14" font-weight="710">agent/auth</text>
+      <text x="18" y="57" fill="#7f8ca0" font-size="10">Postgres · Redis · ports</text>
+      <circle cx="147" cy="23" r="5" fill="#62dfa5"/>
+    </g>
+
+    <g class="sans" transform="translate(258 276)">
+      <rect width="166" height="82" rx="15" fill="#121722" stroke="#355179"/>
+      <circle cx="25" cy="26" r="9" fill="#4b82e7"/>
+      <text x="44" y="31" fill="#f0f4fa" font-size="14" font-weight="710">agent/billing</text>
+      <text x="18" y="57" fill="#7f8ca0" font-size="10">Postgres · Redis · ports</text>
+      <circle cx="147" cy="23" r="5" fill="#62dfa5"/>
+    </g>
+
+    <g class="mono" transform="translate(32 194)">
+      <text x="0" y="0" fill="#7f8ca0" font-size="10">content-addressed lineage</text>
+      <text x="0" y="27" fill="#92b4f7" font-size="11">dev@ca93…</text>
+      <text x="0" y="51" fill="#92b4f7" font-size="11">├─ auth@8ef1…</text>
+      <text x="0" y="75" fill="#92b4f7" font-size="11">└─ billing@4bb2…</text>
+      <rect x="0" y="98" width="166" height="35" rx="9" fill="#152a21" stroke="#2c6f51"/>
+      <text x="83" y="120" text-anchor="middle" fill="#6fdfaa" font-size="10" font-weight="700">RESET TO GOLDEN</text>
+    </g>
+  </g>
+</svg>
