@@ -24,11 +24,17 @@ Homebrew 6 requires explicit trust for non-official tap formulae. The trust comm
 ## npm
 
 ```bash
-npm install -g https://github.com/MuratKomurcu1/BranchLift/releases/download/v1.2.0/branchlift-1.2.0.tgz
+npm install -g branchlift
 branchlift --version
 ```
 
-This is the published GitHub Release artifact and works without an npm account. Once registry publishing is enabled, `npm install -g branchlift` is the shorter equivalent.
+The public package is published at [npmjs.com/package/branchlift](https://www.npmjs.com/package/branchlift). Installing a public package does not require an npm account.
+
+To install the immutable GitHub Release artifact without using the npm registry:
+
+```bash
+npm install -g https://github.com/MuratKomurcu1/BranchLift/releases/download/v1.2.0/branchlift-1.2.0.tgz
+```
 
 ## Install from a checkout
 
@@ -50,7 +56,7 @@ branchlift --version
 
 This is the closest local equivalent to an npm install and catches missing packaged files.
 
-The release workflow runs type checks, unit tests, package validation, the Linux Docker E2E suite, and then publishes with npm provenance. No release happens from ordinary pushes.
+The release workflow runs type checks, unit tests, package validation, the Linux Docker E2E suite, and then publishes through npm trusted publishing with automatic provenance. No release happens from ordinary pushes.
 
 ## Project setup
 

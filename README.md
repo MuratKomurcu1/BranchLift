@@ -63,7 +63,7 @@ MongoDB, Kafka, Windows, and Podman are not yet claimed as production-ready. Exi
 Requirements: Node.js 22+, Git, Docker, and Docker Compose 2.24.4+.
 
 ```bash
-npm install -g https://github.com/MuratKomurcu1/BranchLift/releases/download/v1.2.0/branchlift-1.2.0.tgz
+npm install -g branchlift
 
 # or
 brew tap MuratKomurcu1/tap
@@ -72,7 +72,7 @@ brew install branchlift
 ```
 
 Homebrew 6 requires the explicit trust step for every non-official tap formula.
-After the package owner configures npm publishing, the shorter `npm install -g branchlift` command will install the same artifact from the registry.
+The versioned GitHub Release tarball remains available as an npm-registry-independent fallback.
 
 See [docs/INSTALL.md](docs/INSTALL.md) for requirements, source installation, and package verification.
 

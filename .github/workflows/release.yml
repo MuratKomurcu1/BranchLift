@@ -12,15 +12,14 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
           cache: npm
+      - name: Use an npm version with trusted publishing support
+        run: npm install --global npm@11
       - run: npm ci
       - run: npm run verify
       - run: npm run test:e2e
@@ -30,6 +29,5 @@ jobs:
         run: gh release upload "${{ github.event.release.tag_name }}" branchlift-*.tgz --clobber
         env:
           GH_TOKEN: ${{ github.token }}
-      - name: Publish to npm with provenance
-        if: env.NODE_AUTH_TOKEN != ''
-        run: npm publish --access public --provenance
+      - name: Publish to npm through OIDC
+        run: npm publish --access public
