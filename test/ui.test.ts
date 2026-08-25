@@ -26,12 +26,20 @@ test("serves a token-protected loopback control plane with strict browser header
     const pageText = await page.text();
     assert.doesNotMatch(pageText, /test-token-that-is-longer/);
     assert.match(pageText, /live sync, tunnels &amp; BuildKit/i);
+    assert.match(pageText, /data-view="overview"/);
+    assert.match(pageText, /id="onboarding"/);
+    assert.match(pageText, /id="command-dialog"/);
+    assert.match(pageText, /id="theme-toggle"/);
+    assert.match(pageText, /data-ops="build"/);
     const browserCode = await (await fetch(`${origin}/app.js`)).text();
     assert.match(browserCode, /cache-prune/);
     assert.match(browserCode, /tunnel-start/);
     assert.match(browserCode, /applyFilters/);
     assert.match(browserCode, /navigator\.clipboard/);
     assert.match(browserCode, /instance-filter/);
+    assert.match(browserCode, /openCommandPalette/);
+    assert.match(browserCode, /updateRemoteFields/);
+    assert.match(browserCode, /branchlift-theme/);
     assert.match(pageText, /filter-input/);
 
     assert.equal((await fetch(`${origin}/api/state`)).status, 401);

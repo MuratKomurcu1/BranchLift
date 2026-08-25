@@ -9,6 +9,8 @@
 
 BranchLift gives parallel coding agents isolated, stateful backend environments. Git worktrees separate source files; BranchLift also separates PostgreSQL, Redis, queues, object stores, Docker networks, and published ports. Its control plane adds immutable state lineage, a least-privilege agent sandbox, scoped secret injection, SSH workers, a local UI, audit events, and MCP tools.
 
+![BranchLift turns one immutable backend snapshot into isolated state for three parallel coding agents, then resets mutations to golden state](docs/assets/branchlift-state-proof.svg)
+
 ```text
 main snapshot
 ├── agent/fix-auth      → isolated worktree + PostgreSQL + Redis + ports
@@ -20,17 +22,21 @@ It is local-first, agent-agnostic, self-hosted, and has no BranchLift account, h
 
 ## Where BranchLift fits
 
-The 2026 parallel-agent ecosystem is full of excellent **session orchestrators** — Conductor, Vibe Kanban, Claude Squad, Nimbalyst — that launch agents on worktrees and visualize diffs. Cloud platforms (Codespaces, DevPod, E2B) isolate whole machines. Almost none of them solve what an agent actually breaks first: the shared database, queue, and cache state behind the code.
+The 2026 parallel-agent ecosystem has excellent **session orchestrators** — Conductor, Vibe Kanban, Claude Squad, Nimbalyst — that launch agents on worktrees and visualize diffs. Runtime orchestrators such as [Coasts](https://github.com/coast-guard/coasts) go further with isolated containers, seeded volumes, agent shells, secrets, and remote development. Cloud platforms such as Codespaces, DevPod, and E2B isolate whole machines.
 
-BranchLift is that missing layer. It composes with orchestrators rather than replacing them: whatever spawns your worktrees, BranchLift gives each one seeded backend state it can mutate, commit as a child snapshot, diff semantically, and reset — plus a hardened Docker sandbox for untrusted agent commands and your own machines as remote workers over plain SSH.
+BranchLift goes deepest on the **versioned backend-state layer**. Whatever creates your worktree or agent session, BranchLift gives it real Compose state that can be mutated, committed as a content-addressed child snapshot, diffed semantically, and reset. It also provides a least-privilege Docker sandbox and turns machines you already control into workers over strict-host-key SSH.
 
-| Capability | Session orchestrators | Cloud dev VMs | DB branching (cloud) | **BranchLift** |
+| Capability | Session orchestrators | Coasts | Cloud dev VMs | **BranchLift** |
 |---|---|---|---|---|
-| Worktree isolation | ✅ core | ❌ | ❌ | ✅ |
-| Seeded stateful snapshots per branch | ❌ | partial (whole VM) | ✅ Postgres only, cloud | ✅ any Compose volume, local or SSH |
-| Agent command sandbox (no host socket) | ❌ | ✅ VM-sized | ❌ | ✅ container-sized, policy-gated |
-| Remote worker on your own host via SSH | ❌ | own product only | ❌ | ✅ no vendor service |
-| MCP + audit trail | partial | partial | ❌ | ✅ |
+| Agent/worktree workspace UX | ✅ core | ✅ core | partial | attaches through hooks + MCP |
+| Seeded isolated backend state | usually shared | ✅ seeded volumes | whole-VM image | ✅ any discovered Compose volume |
+| Commit → parent lineage → semantic diff → reset | ❌ | not documented | image/snapshot level | ✅ core data-plane contract |
+| Agent execution boundary | usually host | container / DinD model | ✅ VM-sized | ✅ no host socket, policy-gated |
+| Remote machine you already own | uncommon | ✅ remote service | provider-dependent | ✅ plain SSH, no public daemon |
+| Persistent remote builds and cache | uncommon | runtime-oriented | provider-dependent | ✅ repository-scoped BuildKit |
+| Local lifecycle/security/audit UI | partial | ✅ workspace UI | provider UI | ✅ token-protected state control plane |
+
+Use Coasts when you want a broader all-in-one agent workspace and DinD-style runtime orchestration. Use BranchLift when database/queue/cache mutations must be reproducible, reviewable, resettable, and portable across local and SSH hosts. They can also compose: BranchLift is deliberately useful underneath whichever session layer wins.
 
 See [docs/COMPARISON.md](docs/COMPARISON.md) for the detailed August 2026 landscape review.
 
@@ -48,7 +54,7 @@ BranchLift prepares one stopped, immutable golden snapshot and clones its state 
 
 ## Current status
 
-**The current main branch** covers PostgreSQL 16, MySQL 8.4 LTS, and Redis 7 in one real Docker end-to-end contract. It imports an existing stopped-consistent Compose state, garbage-collects old runtimes safely, and runs public Linux lifecycle evidence against pinned Docmost, n8n, and Langfuse stacks. The next release also introduces the v2 control and data planes described below.
+**The current main branch** covers PostgreSQL 16, MySQL 8.4 LTS, and Redis 7 in one real Docker end-to-end contract. It imports an existing stopped-consistent Compose state, garbage-collects old runtimes safely, and runs public Linux lifecycle evidence against pinned Docmost, n8n, and Langfuse stacks. The v2 control and data planes described below are implemented on the current main branch.
 
 Supported today:
 

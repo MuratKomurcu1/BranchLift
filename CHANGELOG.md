@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Redesign the local control plane as a responsive macOS-style desktop experience with light/dark appearance, section navigation, a real-state onboarding checklist, health summaries, guided empty states, a command palette, accessible forms, and operation-specific remote controls.
+- Add a deterministic product-proof visual and an explicit, evidence-based Coasts comparison that positions BranchLift as the deeper versioned backend-state layer rather than an all-in-one session orchestrator.
+
 ## 1.3.2
 
 - Fix release automation by preloading the explicitly approved Alpine sandbox image before the full Docker E2E publication gate.
