@@ -267,7 +267,7 @@ async function provisionInstanceLocked(
 
     if (options.start) {
       await assertDockerReady();
-      await composeUp(runtime, config.snapshot.healthTimeoutSeconds, options.quiet ?? false, inspection.volumes);
+      await composeUp(runtime, config.snapshot.healthTimeoutSeconds, options.quiet ?? false, inspection.volumes, volumeRoot);
       metadata.ports = await publishedPorts(runtime, inspection);
       metadata.status = "running";
     } else {
@@ -316,7 +316,7 @@ async function startInstanceLocked(
     await assertDockerReady();
     const runtime = runtimeFromMetadata(metadata);
     await validateCompose(runtime);
-    await composeUp(runtime, config.snapshot.healthTimeoutSeconds, quiet, inspection.volumes);
+    await composeUp(runtime, config.snapshot.healthTimeoutSeconds, quiet, inspection.volumes, metadata.volumeRoot);
     metadata.ports = await publishedPorts(runtime, inspection);
     metadata.managedVolumes = inspection.volumes;
     metadata.status = "running";
@@ -341,7 +341,7 @@ async function stopInstanceLocked(repo: RepoInfo, branch: string): Promise<Insta
   const slug = safeSlug(branch);
   const metadata = await readInstanceMetadata(repo, slug);
   const runtime = runtimeFromMetadata(metadata);
-  await normalizeRuntimeStateOwnership(runtime, metadata.managedVolumes ?? []);
+  await normalizeRuntimeStateOwnership(runtime, metadata.managedVolumes ?? [], metadata.volumeRoot);
   await composeDownBestEffort(runtime);
   metadata.status = "stopped";
   metadata.ports = [];
@@ -386,7 +386,7 @@ async function resetInstanceLocked(
   let generationAdopted = false;
   try {
     const previousRuntime = runtimeFromMetadata(metadata);
-    await normalizeRuntimeStateOwnership(previousRuntime, metadata.managedVolumes ?? inspection.volumes);
+    await normalizeRuntimeStateOwnership(previousRuntime, metadata.managedVolumes ?? inspection.volumes, previousVolumeRoot);
     await composeDownBestEffort(previousRuntime);
     const generation = randomUUID().slice(0, 8);
     const volumeRoot = join(root, `volumes-${generation}`);
@@ -442,7 +442,7 @@ async function resetInstanceLocked(
     await writeJsonAtomic(join(root, "context.json"), instanceContext(metadata));
     if (start) {
       await assertDockerReady();
-      await composeUp(runtime, config.snapshot.healthTimeoutSeconds, false, inspection.volumes);
+      await composeUp(runtime, config.snapshot.healthTimeoutSeconds, false, inspection.volumes, volumeRoot);
       metadata.ports = await publishedPorts(runtime, inspection);
       metadata.status = "running";
     } else {
@@ -525,7 +525,7 @@ async function destroyInstanceLocked(
   }
   const runtime = runtimeFromMetadata(metadata);
   if ((await Promise.all(runtime.composeFiles.map(async (file) => await pathExists(file)))).every(Boolean) && (await pathExists(runtime.overrideFile))) {
-    await normalizeRuntimeStateOwnership(runtime, metadata.managedVolumes ?? []);
+    await normalizeRuntimeStateOwnership(runtime, metadata.managedVolumes ?? [], metadata.volumeRoot);
     await composeDownBestEffort(runtime);
   }
 

@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { join } from "node:path";
+import { volumeDirectoryName } from "./compose.js";
 import { BranchLiftError } from "./errors.js";
 import { runCommand } from "./process.js";
 import type { ComposeInspection, PublishedPort, VolumeBinding } from "./types.js";
@@ -61,6 +63,7 @@ export async function composeUp(
   timeoutSeconds: number,
   quiet = false,
   managedVolumes: VolumeBinding[] = [],
+  volumeRoot?: string,
 ): Promise<void> {
   try {
     await runCommand(
@@ -74,7 +77,7 @@ export async function composeUp(
       allowFailure: true,
     });
     const detail = [logs.stdout.trim(), logs.stderr.trim()].filter(Boolean).join("\n");
-    await normalizeRuntimeStateOwnership(runtime, managedVolumes);
+    await normalizeRuntimeStateOwnership(runtime, managedVolumes, volumeRoot);
     await composeDownBestEffort(runtime);
     throw new BranchLiftError(
       "Compose stack failed to become healthy.",
@@ -86,18 +89,67 @@ export async function composeUp(
 export async function normalizeRuntimeStateOwnership(
   runtime: ComposeRuntime,
   volumes: VolumeBinding[],
+  volumeRoot?: string,
 ): Promise<void> {
   if (process.getuid === undefined || process.getgid === undefined || process.getuid() === 0) return;
   const owner = `${process.getuid()}:${process.getgid()}`;
   const unique = new Map(volumes.map((volume) => [`${volume.service}\0${volume.target}`, volume]));
+  let helperImages: string[] | undefined;
   for (const volume of unique.values()) {
     if (volume.readOnly) continue;
-    await runCommand(
+    const direct = await runCommand(
       "docker",
       [...composeArgs(runtime), "exec", "-T", "--user", "0", volume.service, "chown", "-R", owner, volume.target],
       { cwd: runtime.cwd, allowFailure: true },
     );
+    if (direct.exitCode === 0 || volumeRoot === undefined) continue;
+    helperImages ??= await runtimeStateHelperImages(runtime, [...unique.values()].map(({ service }) => service));
+    const source = join(volumeRoot, volumeDirectoryName(volume.source));
+    for (const image of helperImages) {
+      const fallback = await runCommand(
+        "docker",
+        [
+          "run",
+          "--rm",
+          "--network",
+          "none",
+          "--read-only",
+          "--user",
+          "0",
+          "--entrypoint",
+          "chown",
+          "--mount",
+          `type=bind,src=${source},dst=/branchlift-state`,
+          image,
+          "-R",
+          owner,
+          "/branchlift-state",
+        ],
+        { cwd: runtime.cwd, allowFailure: true },
+      );
+      if (fallback.exitCode === 0) break;
+    }
   }
+}
+
+async function runtimeStateHelperImages(runtime: ComposeRuntime, services: string[]): Promise<string[]> {
+  const images = new Set<string>();
+  for (const service of new Set(services)) {
+    const containers = await runCommand(
+      "docker",
+      [...composeArgs(runtime), "ps", "--all", "--quiet", service],
+      { cwd: runtime.cwd, allowFailure: true },
+    );
+    for (const container of containers.stdout.split("\n").map((value) => value.trim()).filter(Boolean)) {
+      const inspected = await runCommand("docker", ["inspect", "--format", "{{.Image}}", container], {
+        cwd: runtime.cwd,
+        allowFailure: true,
+      });
+      const image = inspected.stdout.trim();
+      if (inspected.exitCode === 0 && image !== "") images.add(image);
+    }
+  }
+  return [...images];
 }
 
 export async function composeLogs(

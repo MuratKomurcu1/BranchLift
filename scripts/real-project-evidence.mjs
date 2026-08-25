@@ -24,6 +24,7 @@ const branch = `evidence/${project.slug}`;
 const timings = {};
 let instance;
 let passed = false;
+let destroyed = false;
 
 try {
   let composeText = await fetchText(rawUrl(project.repo, project.commit, project.path));
@@ -87,6 +88,8 @@ try {
   if (!preview[0]?.services?.some((service) => service.state === "running")) {
     throw new Error(`${project.name}: preview did not report running services`);
   }
+  await run(process.execPath, [cli, "destroy", branch, "--worktree"], root, true);
+  destroyed = true;
 
   const result = {
     generatedAt: new Date().toISOString(),
@@ -111,8 +114,13 @@ try {
   if (!passed && process.env.BRANCHLIFT_EVIDENCE_KEEP_FAILED === "1") {
     process.stderr.write(`Failed evidence workspace kept at ${root}\n`);
   } else {
-    await runBestEffort(process.execPath, [cli, "destroy", branch, "--worktree"], root);
-    await rm(root, { recursive: true, force: true });
+    if (!destroyed) await runBestEffort(process.execPath, [cli, "destroy", branch, "--worktree"], root);
+    try {
+      await rm(root, { recursive: true, force: true });
+    } catch (error) {
+      if (passed) throw error;
+      process.stderr.write(`Evidence cleanup warning: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
   }
 }
 
