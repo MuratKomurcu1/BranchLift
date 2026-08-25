@@ -9,6 +9,7 @@ import {
   composeUp,
   normalizeRuntimeStateOwnership,
   publishedPorts,
+  reclaimManagedTreeOwnership,
   validateCompose,
 } from "./docker.js";
 import { BranchLiftError, errorDetail } from "./errors.js";
@@ -499,6 +500,7 @@ async function resetInstanceLocked(
     await writeInstanceMetadata(repo, slug, metadata);
     await writeJsonAtomic(join(root, "context.json"), instanceContext(metadata));
     if (previousVolumeRoot !== volumeRoot) {
+      await reclaimManagedTreeOwnership(runtime, inspection.volumes, previousVolumeRoot).catch(() => undefined);
       await rm(previousVolumeRoot, { recursive: true, force: true }).catch(() => undefined);
     }
     if (previousOverrideFile !== overrideFile) {
@@ -592,6 +594,7 @@ async function destroyInstanceLocked(
   if (!resolvedRoot.startsWith(`${managedParent}/`)) {
     throw new BranchLiftError(`Refusing to remove a path outside BranchLift state: ${resolvedRoot}`);
   }
+  await reclaimManagedTreeOwnership(runtime, metadata.managedVolumes ?? [], metadata.volumeRoot).catch(() => undefined);
   await rm(resolvedRoot, { recursive: true, force: false });
   return { runtimeRemoved: true, worktreeRemoved };
 }

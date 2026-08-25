@@ -2,6 +2,8 @@
 
 ## 1.3.0
 
+- Fix Linux cleanup of stateful instances: ownership of managed volume trees is reclaimed through a privileged helper container before deletion, so database entrypoints that reown bind-mounted files (for example MySQL's `#innodb_redo`) no longer cause `EACCES` during destroy or generation replacement.
+
 - Upgrade the control-plane UI with live filtering for environments, snapshots, and audit events, a `/` keyboard shortcut, Escape-to-clear, and click-to-copy endpoint URLs.
 - Document BranchLift's position in the August 2026 parallel-agent tool landscape, including an honest gaps assessment, in `docs/COMPARISON.md`, and surface badges plus a capability comparison in the README.
 - Fix sandbox secret injection: environment-target secrets are written verbatim for `docker run --env-file` (the previous file reused Compose `$$` escaping, and the escaping itself never applied due to JavaScript replace semantics), while Compose interpolation files escape correctly.

@@ -140,6 +140,34 @@ export async function normalizeRuntimeStateOwnership(
   }
 }
 
+/**
+ * Reclaims host-user ownership of managed state trees through a privileged
+ * helper container so subsequent deletions never fail with EACCES after a
+ * database entrypoint has reowned bind-mounted files. Never targets running
+ * service containers; call it after compose down.
+ */
+export async function reclaimManagedTreeOwnership(
+  runtime: ComposeRuntime,
+  volumes: VolumeBinding[],
+  volumeRoot?: string,
+): Promise<void> {
+  if (volumeRoot === undefined) return;
+  if (process.getuid === undefined || process.getgid === undefined || process.getuid() === 0) return;
+  const unique = new Map(
+    volumes
+      .filter((volume) => !volume.readOnly)
+      .map((volume) => [`${volume.service}\0${volume.target}`, volume] as const),
+  );
+  if (unique.size === 0) return;
+  const helperImages = await runtimeStateHelperImages(runtime, [...unique.values()].map(({ service }) => service));
+  if (helperImages.length === 0) return;
+  const owner = `${process.getuid()}:${process.getgid()}`;
+  for (const volume of unique.values()) {
+    const source = join(volumeRoot, volumeDirectoryName(volume.source));
+    await chownRuntimeDirectory(runtime, helperImages, source, owner);
+  }
+}
+
 async function runtimeServiceOwner(runtime: ComposeRuntime, service: string): Promise<string | undefined> {
   const containers = await runCommand("docker", [...composeArgs(runtime), "ps", "--all", "--quiet", service], {
     cwd: runtime.cwd,
