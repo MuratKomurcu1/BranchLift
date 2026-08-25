@@ -1167,9 +1167,13 @@ async function ensureRemoteReady(repo: RepoInfo, name: string): Promise<void> {
 }
 
 function errorText(error: unknown): string {
-  if (error instanceof BranchLiftError) return [error.message, error.hint].filter(Boolean).join(" ");
-  if (error instanceof Error && error.stack) return error.stack;
-  return error instanceof Error ? error.message : String(error);
+  const debug = process.env.BRANCHLIFT_DEBUG === "1";
+  if (error instanceof BranchLiftError) {
+    const text = [error.message, error.hint].filter(Boolean).join(" ");
+    return debug && error.stack ? `${text}\n${error.stack}` : text;
+  }
+  if (error instanceof Error) return debug ? error.stack ?? error.message : error.stack ?? error.message;
+  return String(error);
 }
 
 function requirePositional(args: string[], name: string): string {
