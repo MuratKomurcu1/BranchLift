@@ -61,8 +61,12 @@ Requirements: Node.js 22+, Git, Docker, and Docker Compose 2.24.4+.
 npm install -g branchlift
 
 # or
-brew install muratkomurcu/tap/branchlift
+brew tap muratkomurcu/tap
+brew trust --formula muratkomurcu/tap/branchlift
+brew install branchlift
 ```
+
+Homebrew 6 requires the explicit trust step for every non-official tap formula.
 
 See [docs/INSTALL.md](docs/INSTALL.md) for requirements, source installation, and package verification.
 

@@ -13,9 +13,13 @@ BranchLift is local software. It needs no account, hosted service, API key, or p
 ## Homebrew
 
 ```bash
-brew install muratkomurcu/tap/branchlift
+brew tap muratkomurcu/tap
+brew trust --formula muratkomurcu/tap/branchlift
+brew install branchlift
 branchlift --version
 ```
+
+Homebrew 6 requires explicit trust for non-official tap formulae. The trust command is scoped to BranchLift rather than the entire tap.
 
 ## npm
 
