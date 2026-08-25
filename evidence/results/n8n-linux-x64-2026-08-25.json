@@ -1,0 +1,53 @@
+{
+  "generatedAt": "2026-08-25T01:32:21.796Z",
+  "project": "n8n Hosting",
+  "source": "https://github.com/n8n-io/n8n-hosting/tree/6b78193475d84ae190622d8a8e9ba8598e89b7d1",
+  "composePath": "docker-compose/withPostgres/docker-compose.yml",
+  "imageDigests": {
+    "n8n": "docker.n8n.io/n8nio/n8n@sha256:166d7e3ca384afdffe75394bf00046c299d84a4bf17b19b35d6cf7773af0a147",
+    "n8n-runner": "n8nio/runners@sha256:0fdd4a56f501881f2f3c567f798c86a2b31a6c8cd629e8f91b710321f6abd823",
+    "postgres": "postgres@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941"
+  },
+  "lifecycle": [
+    "snapshot",
+    "spawn",
+    "HTTP readiness",
+    "state verification",
+    "mutation",
+    "reset",
+    "golden-state verification",
+    "destroy"
+  ],
+  "httpStatus": 200,
+  "services": [
+    {
+      "service": "n8n",
+      "state": "running"
+    },
+    {
+      "service": "n8n-runner",
+      "state": "running"
+    },
+    {
+      "service": "postgres",
+      "state": "running",
+      "health": "healthy"
+    }
+  ],
+  "endpoints": [
+    {
+      "service": "n8n",
+      "target": 5678,
+      "protocol": "tcp",
+      "url": "tcp://127.0.0.1:32770"
+    }
+  ],
+  "readinessUrl": "http://127.0.0.1:32770/healthz",
+  "copyStrategy": "recursive-copy",
+  "timings": {
+    "snapshotMs": 18902.92,
+    "spawnMs": 8373.98,
+    "resetMs": 11027.53
+  },
+  "result": "passed"
+}

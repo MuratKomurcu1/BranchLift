@@ -1,0 +1,37 @@
+{
+  "generatedAt": "2026-08-25T01:18:04.829Z",
+  "fixtureMiB": 512,
+  "methodology": "alternating native clone/reflink and forced full-copy samples on the same warm filesystem",
+  "platform": {
+    "node": "v22.23.2",
+    "os": "linux",
+    "arch": "x64",
+    "filesystem": "/dev/loop0     btrfs   3145728 534324   2078188  21% /mnt/branchlift-btrfs"
+  },
+  "snapshot": "synthetic",
+  "iterations": 7,
+  "logicalBytes": 536870912,
+  "strategy": "linux-reflink",
+  "cloneSamplesMs": [
+    32.66,
+    31,
+    31.25,
+    30.82,
+    32.88,
+    31.53,
+    30.99
+  ],
+  "fullCopySamplesMs": [
+    600.95,
+    599.91,
+    679.03,
+    654.65,
+    6354.92,
+    556.18,
+    578.15
+  ],
+  "cloneMedianMs": 31.25,
+  "cloneP95Ms": 32.88,
+  "fullCopyMedianMs": 600.95,
+  "speedup": 19.23
+}

@@ -1,0 +1,113 @@
+{
+  "generatedAt": "2026-08-25T01:33:07.954Z",
+  "project": "Langfuse",
+  "source": "https://github.com/langfuse/langfuse/tree/ea3c905cd535fb7d54c008ed8ea89d6f3ba684b9",
+  "composePath": "docker-compose.yml",
+  "imageDigests": {
+    "clickhouse": "clickhouse/clickhouse-server@sha256:8a790dd3468db22b1d4e7b18a176f378ff5ff6053b9c48dd4ea1fa71a24c5ba6",
+    "langfuse-web": "docker.langfuse.com/langfuse/langfuse@sha256:26b4dc06819dd15761822f6a79eb37bf34bac18a414692fcdde3593964e3dd4e",
+    "langfuse-worker": "docker.langfuse.com/langfuse/langfuse-worker@sha256:38cb37b87a6dd2aa1f09ae4496653bccdb33664a49b3dec37b52f3e32de166d2",
+    "minio": "cgr.dev/chainguard/minio@sha256:ab73368025bb948190c734b619d2bdf25e4da600d7f6aa3453818c449e52be86",
+    "postgres": "postgres@sha256:e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449",
+    "redis": "redis@sha256:91d0f7e8c748ec7a4c2b4fb2c4f84edab794dd91d01e095e38dc906db9d684ab"
+  },
+  "lifecycle": [
+    "snapshot",
+    "spawn",
+    "HTTP readiness",
+    "state verification",
+    "mutation",
+    "reset",
+    "golden-state verification",
+    "destroy"
+  ],
+  "httpStatus": 200,
+  "services": [
+    {
+      "service": "clickhouse",
+      "state": "running",
+      "health": "healthy"
+    },
+    {
+      "service": "langfuse-web",
+      "state": "running"
+    },
+    {
+      "service": "langfuse-worker",
+      "state": "running"
+    },
+    {
+      "service": "minio",
+      "state": "running",
+      "health": "healthy"
+    },
+    {
+      "service": "postgres",
+      "state": "running",
+      "health": "healthy"
+    },
+    {
+      "service": "redis",
+      "state": "running",
+      "health": "healthy"
+    }
+  ],
+  "endpoints": [
+    {
+      "service": "langfuse-worker",
+      "target": 3030,
+      "protocol": "tcp",
+      "url": "tcp://127.0.0.1:32790"
+    },
+    {
+      "service": "langfuse-web",
+      "target": 3000,
+      "protocol": "tcp",
+      "url": "tcp://127.0.0.1:32791"
+    },
+    {
+      "service": "clickhouse",
+      "target": 8123,
+      "protocol": "tcp",
+      "url": "tcp://127.0.0.1:32788"
+    },
+    {
+      "service": "clickhouse",
+      "target": 9000,
+      "protocol": "tcp",
+      "url": "tcp://127.0.0.1:32789"
+    },
+    {
+      "service": "minio",
+      "target": 9000,
+      "protocol": "tcp",
+      "url": "tcp://127.0.0.1:32786"
+    },
+    {
+      "service": "minio",
+      "target": 9001,
+      "protocol": "tcp",
+      "url": "tcp://127.0.0.1:32787"
+    },
+    {
+      "service": "redis",
+      "target": 6379,
+      "protocol": "tcp",
+      "url": "tcp://127.0.0.1:32784"
+    },
+    {
+      "service": "postgres",
+      "target": 5432,
+      "protocol": "tcp",
+      "url": "tcp://127.0.0.1:32785"
+    }
+  ],
+  "readinessUrl": "http://127.0.0.1:32791/api/public/health",
+  "copyStrategy": "recursive-copy",
+  "timings": {
+    "snapshotMs": 38440.61,
+    "spawnMs": 9920.29,
+    "resetMs": 25094.16
+  },
+  "result": "passed"
+}

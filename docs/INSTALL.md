@@ -24,7 +24,7 @@ Homebrew 6 requires explicit trust for non-official tap formulae. The trust comm
 ## npm
 
 ```bash
-npm install -g https://github.com/muratkomurcu/BranchLift/releases/download/v1.1.0/branchlift-1.1.0.tgz
+npm install -g https://github.com/muratkomurcu/BranchLift/releases/download/v1.2.0/branchlift-1.2.0.tgz
 branchlift --version
 ```
 
@@ -44,7 +44,7 @@ branchlift --version
 
 ```bash
 npm pack
-npm install -g ./branchlift-1.1.0.tgz
+npm install -g ./branchlift-1.2.0.tgz
 branchlift --version
 ```
 

@@ -27,7 +27,7 @@ BranchLift prepares one stopped, immutable golden snapshot and clones its state 
 
 ## Current status
 
-**v1.1** covers PostgreSQL 16, MySQL 8.4 LTS, and Redis 7 in one real Docker end-to-end contract. It also adds automatic Codex/Claude/Cursor attachment, a local STDIO MCP server, live endpoint previews, and Compose log access. The test creates two environments, mutates both SQL databases in one branch, proves the other branch remains at golden state, resets the changed branch, and verifies both databases again.
+**v1.2** covers PostgreSQL 16, MySQL 8.4 LTS, and Redis 7 in one real Docker end-to-end contract. It imports an existing stopped-consistent Compose state, garbage-collects old runtimes safely, and runs public Linux lifecycle evidence against pinned Docmost, n8n, and Langfuse stacks. Langfuse exercises PostgreSQL, ClickHouse, MinIO, Redis, web, and worker services through snapshot, spawn, HTTP readiness, mutation, reset, state restoration, and strict cleanup.
 
 Supported today:
 
@@ -49,16 +49,21 @@ Supported today:
 - idempotent session-start hooks for Codex, Claude Code, and Cursor;
 - a local MCP server exposing attach, list, preview, and logs;
 - live service/health inspection through `preview` and targeted Compose logs.
-- pinned compatibility contracts for Langfuse, n8n Hosting, Docmost, Twenty, and Immich.
+- crash-consistent snapshot import from an existing Compose project;
+- age-filtered, lock-rechecked garbage collection for stopped and failed runtimes;
+- pinned compatibility contracts for Langfuse, n8n Hosting, Docmost, Twenty, and Immich;
+- public Linux lifecycle evidence for Docmost, n8n Hosting, and the six-service Langfuse stack;
+- parallel multi-volume cloning and port discovery;
+- a recorded 512 MiB Btrfs reflink benchmark with raw samples.
 
-MongoDB, Kafka, MinIO, Windows, Podman, and live production imports are not yet claimed as production-ready. Generic named volumes are isolated, but a database-specific production claim requires its own crash-consistency E2E contract.
+MongoDB, Kafka, Windows, and Podman are not yet claimed as production-ready. Existing Compose state can be imported from managed named volumes, but a database-specific production claim still requires its own crash-consistency E2E contract.
 
 ## Install
 
 Requirements: Node.js 22+, Git, Docker, and Docker Compose 2.24.4+.
 
 ```bash
-npm install -g https://github.com/muratkomurcu/BranchLift/releases/download/v1.1.0/branchlift-1.1.0.tgz
+npm install -g https://github.com/muratkomurcu/BranchLift/releases/download/v1.2.0/branchlift-1.2.0.tgz
 
 # or
 brew tap muratkomurcu/tap
@@ -305,7 +310,7 @@ branchlift benchmark dev --iterations 10
 
 For a database-independent fixture use `npm run benchmark:synthetic -- --size-mib 256 --iterations 7`. For the pinned Docmost comparison use `npm run benchmark:docmost -- --dataset-mib 128 --iterations 3`.
 
-The recorded Docmost result is deliberately not presented as a win: its real APFS state clone was 2.51× faster than full copy, but the complete HTTP-ready path was 0.82× because Docker Desktop starts the bind-mounted PostgreSQL state more slowly. Methodology, raw evidence, and the negative controls are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+The recorded Docmost result is deliberately not presented as a win: its real APFS state clone was 2.51× faster than full copy, but the complete HTTP-ready path was 0.82× because Docker Desktop starts the bind-mounted PostgreSQL state more slowly. On the public Linux Btrfs run, the 512 MiB synthetic clone median was 31.25 ms versus 600.95 ms for forced full copy, a 19.23× speedup. Methodology, raw evidence, and negative controls are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Development
 
@@ -324,7 +329,7 @@ npm run test:compat
 npm run verify
 ```
 
-See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [CONTRIBUTING.md](CONTRIBUTING.md) for the exact support contract.
+See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md), [docs/EVIDENCE.md](docs/EVIDENCE.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [CONTRIBUTING.md](CONTRIBUTING.md) for the exact support contract and public lifecycle evidence.
 
 The architecture is documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

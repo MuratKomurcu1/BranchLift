@@ -1,0 +1,52 @@
+{
+  "generatedAt": "2026-08-25T01:32:04.434Z",
+  "project": "Docmost",
+  "source": "https://github.com/docmost/docmost/tree/cd597f0161ab0221cae912cd9f8f71e2da6e607d",
+  "composePath": "docker-compose.yml",
+  "imageDigests": {
+    "db": "postgres@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941",
+    "docmost": "docmost/docmost@sha256:41c8d777cf23c74e78f94e676aec328b7d7856f48df5e573543dac68d371e37c",
+    "redis": "redis@sha256:691577adaf11927f4bb8871d40a5dd69a5c300d4453b742e8f6383c3e6e8d2e1"
+  },
+  "lifecycle": [
+    "snapshot",
+    "spawn",
+    "HTTP readiness",
+    "state verification",
+    "mutation",
+    "reset",
+    "golden-state verification",
+    "destroy"
+  ],
+  "httpStatus": 200,
+  "services": [
+    {
+      "service": "db",
+      "state": "running"
+    },
+    {
+      "service": "docmost",
+      "state": "running"
+    },
+    {
+      "service": "redis",
+      "state": "running"
+    }
+  ],
+  "endpoints": [
+    {
+      "service": "docmost",
+      "target": 3000,
+      "protocol": "tcp",
+      "url": "tcp://127.0.0.1:32770"
+    }
+  ],
+  "readinessUrl": "http://127.0.0.1:32770/",
+  "copyStrategy": "recursive-copy",
+  "timings": {
+    "snapshotMs": 14377.87,
+    "spawnMs": 3947.93,
+    "resetMs": 5949.35
+  },
+  "result": "passed"
+}

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0
+
+- Add crash-consistent `snapshot import` from an existing Compose project, including exact running-service restoration and imported PostgreSQL/MySQL layout metadata.
+- Add race-safe `gc` with age thresholds, dry-run/JSON output, lifecycle-lock rechecks, external-worktree preservation, and reclaimed-byte reporting.
+- Parallelize independent volume clones and published-port discovery.
+- Add a public Linux Btrfs workflow and retain the 512 MiB raw benchmark where reflink cloning measured 19.23× faster than forced full copy at the median.
+- Add digest-pinned, machine-readable Linux lifecycle evidence for Docmost, n8n Hosting, and Langfuse, covering HTTP readiness, PostgreSQL mutation/reset, service health, and strict cleanup.
+- Prepare and reclaim numeric non-root bind ownership without changing application container identities or pulling a dedicated privileged helper image.
+
 ## 1.1.0
 
 - Add idempotent Codex, Claude Code, and Cursor session-start hooks with non-destructive config merging.
