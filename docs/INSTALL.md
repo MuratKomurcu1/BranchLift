@@ -24,9 +24,11 @@ Homebrew 6 requires explicit trust for non-official tap formulae. The trust comm
 ## npm
 
 ```bash
-npm install -g branchlift
+npm install -g https://github.com/muratkomurcu/BranchLift/releases/download/v1.1.0/branchlift-1.1.0.tgz
 branchlift --version
 ```
+
+This is the published GitHub Release artifact and works without an npm account. Once registry publishing is enabled, `npm install -g branchlift` is the shorter equivalent.
 
 ## Install from a checkout
 

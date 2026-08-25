@@ -58,7 +58,7 @@ MongoDB, Kafka, MinIO, Windows, Podman, and live production imports are not yet 
 Requirements: Node.js 22+, Git, Docker, and Docker Compose 2.24.4+.
 
 ```bash
-npm install -g branchlift
+npm install -g https://github.com/muratkomurcu/BranchLift/releases/download/v1.1.0/branchlift-1.1.0.tgz
 
 # or
 brew tap muratkomurcu/tap
@@ -67,6 +67,7 @@ brew install branchlift
 ```
 
 Homebrew 6 requires the explicit trust step for every non-official tap formula.
+After the package owner configures npm publishing, the shorter `npm install -g branchlift` command will install the same artifact from the registry.
 
 See [docs/INSTALL.md](docs/INSTALL.md) for requirements, source installation, and package verification.
 
