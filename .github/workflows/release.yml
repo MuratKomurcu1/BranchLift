@@ -5,13 +5,15 @@ on:
     types: [published]
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v7
@@ -22,6 +24,12 @@ jobs:
       - run: npm ci
       - run: npm run verify
       - run: npm run test:e2e
-      - run: npm publish --access public --provenance
+      - name: Build release tarball
+        run: npm pack
+      - name: Attach tarball to GitHub Release
+        run: gh release upload "${{ github.event.release.tag_name }}" branchlift-*.tgz --clobber
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+      - name: Publish to npm with provenance
+        if: env.NODE_AUTH_TOKEN != ''
+        run: npm publish --access public --provenance

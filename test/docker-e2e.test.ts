@@ -42,6 +42,18 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     assert.equal(await realpath(attached.worktreePath), await realpath(root));
     assert.equal(await probe(attached, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
     assert.equal(await mysqlProbe(attached, "SELECT value FROM branchlift_mysql_probe WHERE id = 1"), "golden");
+    const hook = JSON.parse(
+      await run(process.execPath, [cli, "hook", "attach", "--format", "claude"], root, env),
+    ) as { hookSpecificOutput: { additionalContext: string } };
+    assert.match(hook.hookSpecificOutput.additionalContext, /backend reused for main/);
+    assert.equal((JSON.parse(await run(process.execPath, [cli, "list", "--json"], root, env)) as InstanceMetadata[]).length, 1);
+    const preview = JSON.parse(
+      await run(process.execPath, [cli, "preview", "main", "--json"], root, env),
+    ) as Array<{ branch: string; endpoints: unknown[]; services?: Array<{ state: string }> }>;
+    assert.equal(preview[0]?.branch, "main");
+    assert.ok((preview[0]?.endpoints.length ?? 0) >= 3);
+    assert.ok(preview[0]?.services?.some(({ state }) => state === "running"));
+    assert.notEqual((await run(process.execPath, [cli, "logs", "main", "--service", "postgres", "--tail", "20"], root, env)).trim(), "");
     const removeAttachedWorktree = await runCommand(
       process.execPath,
       [cli, "destroy", "main", "--worktree"],

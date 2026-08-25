@@ -53,6 +53,10 @@ Instance metadata records worktree ownership. BranchLift-generated worktrees are
 
 Reset uses volume generations instead of deleting and repopulating an already-mounted bind source. A complete clone and a new override are validated under unique paths, metadata adopts that generation, and the previous generation is removed only after the replacement is healthy. This prevents partial resets and stale bind-path caches from reaching the database process.
 
+`branchlift hook attach` wraps attachment in an idempotent ensure operation. A running instance in the same worktree is reused, a stopped instance is started, and only a missing instance is provisioned. Conflicting worktrees and failed/partial instances require explicit repair rather than being silently replaced.
+
+The repo-local agent installer merges Codex and Claude `SessionStart` hooks, Cursor `sessionStart`, and project MCP configuration without replacing unrelated settings. The STDIO MCP server writes only JSON-RPC to stdout; mutating calls use quiet Compose execution so container progress cannot corrupt the protocol stream.
+
 ## Concurrency control
 
 Every mutating snapshot or instance operation owns an atomic filesystem lock containing its scope, operation, process ID, host, and start time. Instance operations use one lock per branch, so unrelated branches remain parallel. Spawn briefly nests the selected snapshot lock until dependency metadata exists; after that, dependency-protected deletion keeps the immutable source alive without serializing container startup.

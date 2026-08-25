@@ -10,6 +10,20 @@
 
 BranchLift is local software. It needs no account, hosted service, API key, or paid dependency.
 
+## Homebrew
+
+```bash
+brew install muratkomurcu/tap/branchlift
+branchlift --version
+```
+
+## npm
+
+```bash
+npm install -g branchlift
+branchlift --version
+```
+
 ## Install from a checkout
 
 ```bash
@@ -20,25 +34,17 @@ npm install -g .
 branchlift --version
 ```
 
-Until the repository and first npm release are public, the current checkout is the canonical install source.
-
 ## Test the exact package artifact
 
 ```bash
 npm pack
-npm install -g ./branchlift-1.0.0.tgz
+npm install -g ./branchlift-1.1.0.tgz
 branchlift --version
 ```
 
 This is the closest local equivalent to an npm install and catches missing packaged files.
 
-## npm after the first release
-
-```bash
-npm install -g branchlift
-```
-
-The release workflow publishes only when a GitHub Release is published. It runs type checks, unit tests, package validation, the Linux Docker E2E suite, and then `npm publish --provenance`. Publishing requires an npm token or trusted-publishing configuration in the repository settings; no release happens from ordinary pushes.
+The release workflow runs type checks, unit tests, package validation, the Linux Docker E2E suite, and then publishes with npm provenance. No release happens from ordinary pushes.
 
 ## Project setup
 
@@ -48,6 +54,7 @@ branchlift init --dry-run
 branchlift init
 branchlift inspect
 branchlift snapshot dev
+branchlift agents install all
 ```
 
 If the project uses non-standard Compose filenames, preserve merge order explicitly:

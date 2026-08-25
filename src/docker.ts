@@ -9,6 +9,12 @@ export interface ComposeRuntime {
   project: string;
 }
 
+export interface ComposeServiceStatus {
+  service: string;
+  state: string;
+  health?: string;
+}
+
 export async function assertDockerReady(): Promise<void> {
   const result = await runCommand("docker", ["info", "--format", "{{.ServerVersion}}"], { allowFailure: true });
   if (result.exitCode !== 0) {
@@ -43,12 +49,12 @@ export async function validateCompose(runtime: ComposeRuntime): Promise<void> {
   await runCommand("docker", [...composeArgs(runtime), "config", "--quiet"], { cwd: runtime.cwd });
 }
 
-export async function composeUp(runtime: ComposeRuntime, timeoutSeconds: number): Promise<void> {
+export async function composeUp(runtime: ComposeRuntime, timeoutSeconds: number, quiet = false): Promise<void> {
   try {
     await runCommand(
       "docker",
       [...composeArgs(runtime), "up", "-d", "--wait", "--wait-timeout", String(timeoutSeconds)],
-      { cwd: runtime.cwd, stdio: "inherit" },
+      { cwd: runtime.cwd, stdio: quiet ? "capture" : "inherit" },
     );
   } catch (error) {
     const logs = await runCommand("docker", [...composeArgs(runtime), "logs", "--no-color", "--tail", "80"], {
@@ -61,6 +67,42 @@ export async function composeUp(runtime: ComposeRuntime, timeoutSeconds: number)
       "Compose stack failed to become healthy.",
       detail !== "" ? detail : error instanceof Error ? error.message : String(error),
     );
+  }
+}
+
+export async function composeLogs(
+  runtime: ComposeRuntime,
+  options: { service?: string; tail: number; follow: boolean; timestamps: boolean },
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const args = [...composeArgs(runtime), "logs", "--no-color", "--tail", String(options.tail)];
+  if (options.timestamps) args.push("--timestamps");
+  if (options.follow) args.push("--follow");
+  if (options.service !== undefined) args.push(options.service);
+  return await runCommand("docker", args, {
+    cwd: runtime.cwd,
+    stdio: options.follow ? "inherit" : "capture",
+    allowFailure: false,
+  });
+}
+
+export async function composeServiceStatuses(runtime: ComposeRuntime): Promise<ComposeServiceStatus[] | undefined> {
+  try {
+    const result = await runCommand(
+      "docker",
+      [...composeArgs(runtime), "ps", "--all", "--format", "json"],
+      { cwd: runtime.cwd, allowFailure: true },
+    );
+    if (result.exitCode !== 0) return undefined;
+    const records = parseJsonRecords(result.stdout);
+    return records.flatMap((record) => {
+      const service = stringField(record, "Service");
+      const state = stringField(record, "State");
+      if (service === undefined || state === undefined) return [];
+      const health = stringField(record, "Health");
+      return [{ service, state, ...(health === undefined || health === "" ? {} : { health }) }];
+    });
+  } catch {
+    return undefined;
   }
 }
 
@@ -156,4 +198,35 @@ function parseAddress(value: string): { host: string; port: number } | undefined
   const regular = /^(.*):(\d+)$/.exec(value);
   if (!regular) return undefined;
   return { host: regular[1] || "127.0.0.1", port: Number(regular[2]) };
+}
+
+function parseJsonRecords(value: string): Record<string, unknown>[] {
+  const trimmed = value.trim();
+  if (trimmed === "") return [];
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) return parsed.filter(isRecord);
+    if (isRecord(parsed)) return [parsed];
+  } catch {
+    const records: Record<string, unknown>[] = [];
+    for (const line of trimmed.split("\n")) {
+      try {
+        const parsed: unknown = JSON.parse(line);
+        if (isRecord(parsed)) records.push(parsed);
+      } catch {
+        return [];
+      }
+    }
+    return records;
+  }
+  return [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringField(value: Record<string, unknown>, key: string): string | undefined {
+  const field = value[key];
+  return typeof field === "string" ? field : undefined;
 }

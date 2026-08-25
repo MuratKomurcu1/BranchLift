@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.0
+
+- Add idempotent Codex, Claude Code, and Cursor session-start hooks with non-destructive config merging.
+- Add a local STDIO MCP server for attach, list, preview, and logs workflows.
+- Add `branchlift preview` with live Compose state/health and `branchlift logs` with service, tail, follow, and timestamp controls.
+- Add a pinned, digest-resolved Docmost benchmark with equivalent seeded state, raw samples, negative controls, and separate clone versus end-to-end metrics.
+- Add npm/Homebrew release packaging and one-command install documentation.
+
 ## 1.0.0
 
 - Add first-class MySQL 8.4 snapshot, spawn, mutation-isolation, and reset coverage.

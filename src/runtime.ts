@@ -40,12 +40,20 @@ export interface SpawnOptions {
   snapshot: string;
   start: boolean;
   agentCommand: string[];
+  quiet?: boolean;
 }
 
 export type AttachOptions = SpawnOptions;
 
 export interface StartOptions {
   agentCommand: string[];
+  quiet?: boolean;
+}
+
+export interface EnsureOptions {
+  snapshot: string;
+  start: boolean;
+  quiet?: boolean;
 }
 
 export async function execInInstance(repo: RepoInfo, branch: string, command: string[]): Promise<number> {
@@ -115,6 +123,51 @@ export async function attachInstance(
   });
   await launchAgent(metadata, join(instanceRoot(repo, metadata.slug), "context.json"), options.agentCommand);
   return metadata;
+}
+
+export async function ensureAttachedInstance(
+  repo: RepoInfo,
+  config: BranchLiftConfig,
+  inspection: ComposeInspection,
+  branch: string,
+  options: EnsureOptions,
+): Promise<{ instance: InstanceMetadata; action: "attached" | "started" | "reused" }> {
+  return await withLock(repo, instanceLockScope(branch), "ensure attach", async () => {
+    const slug = safeSlug(branch);
+    if (await pathExists(instanceRoot(repo, slug))) {
+      const metadata = await readInstanceMetadata(repo, slug);
+      if (resolve(metadata.worktreePath) !== resolve(repo.root)) {
+        throw new BranchLiftError(
+          `Branch ${branch} is already attached to a different worktree.`,
+          `Existing: ${metadata.worktreePath}\nCurrent: ${repo.root}`,
+        );
+      }
+      if (metadata.status === "running") return { instance: metadata, action: "reused" };
+      if (metadata.status === "stopped" && options.start) {
+        return {
+          instance: await startInstanceLocked(repo, config, inspection, branch, options.quiet ?? false),
+          action: "started",
+        };
+      }
+      if (metadata.status === "stopped") return { instance: metadata, action: "reused" };
+      throw new BranchLiftError(
+        `Instance ${branch} is ${metadata.status}.`,
+        `Run branchlift doctor, then reset or destroy the failed instance explicitly.`,
+      );
+    }
+    const instance = await provisionInstanceLocked(
+      repo,
+      config,
+      inspection,
+      branch,
+      { ...options, agentCommand: [] },
+      repo.root,
+      "external",
+      false,
+      "attach",
+    );
+    return { instance, action: "attached" };
+  });
 }
 
 async function provisionInstanceLocked(
@@ -192,7 +245,7 @@ async function provisionInstanceLocked(
 
     if (options.start) {
       await assertDockerReady();
-      await composeUp(runtime, config.snapshot.healthTimeoutSeconds);
+      await composeUp(runtime, config.snapshot.healthTimeoutSeconds, options.quiet ?? false);
       metadata.ports = await publishedPorts(runtime, inspection);
       metadata.status = "running";
     } else {
@@ -217,7 +270,7 @@ export async function startInstance(
   options: StartOptions,
 ): Promise<InstanceMetadata> {
   const metadata = await withLock(repo, instanceLockScope(branch), "start", async () => {
-    return await startInstanceLocked(repo, config, inspection, branch);
+    return await startInstanceLocked(repo, config, inspection, branch, options.quiet ?? false);
   });
   await launchAgent(metadata, join(instanceRoot(repo, metadata.slug), "context.json"), options.agentCommand);
   return metadata;
@@ -228,6 +281,7 @@ async function startInstanceLocked(
   config: BranchLiftConfig,
   inspection: ComposeInspection,
   branch: string,
+  quiet = false,
 ): Promise<InstanceMetadata> {
   const slug = safeSlug(branch);
   const metadata = await readInstanceMetadata(repo, slug);
@@ -240,7 +294,7 @@ async function startInstanceLocked(
     await assertDockerReady();
     const runtime = runtimeFromMetadata(metadata);
     await validateCompose(runtime);
-    await composeUp(runtime, config.snapshot.healthTimeoutSeconds);
+    await composeUp(runtime, config.snapshot.healthTimeoutSeconds, quiet);
     metadata.ports = await publishedPorts(runtime, inspection);
     metadata.status = "running";
     delete metadata.error;
@@ -419,7 +473,7 @@ async function destroyInstanceLocked(
   return { runtimeRemoved: true, worktreeRemoved };
 }
 
-function instanceContext(metadata: InstanceMetadata): Record<string, unknown> {
+export function instanceContext(metadata: InstanceMetadata): Record<string, unknown> {
   const urls: Record<string, string[]> = {};
   for (const port of metadata.ports) {
     const values = urls[port.service] ?? [];
@@ -499,7 +553,7 @@ function normalizeHost(host: string): string {
   return host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
 }
 
-function runtimeFromMetadata(metadata: InstanceMetadata) {
+export function runtimeFromMetadata(metadata: InstanceMetadata) {
   return {
     cwd: metadata.worktreePath,
     composeFiles: (metadata.composeFiles ?? [metadata.composeFile]).map((file) => resolve(metadata.worktreePath, file)),

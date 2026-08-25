@@ -3,17 +3,22 @@
 import { pathToFileURL } from "node:url";
 import { realpath } from "node:fs/promises";
 import { relative } from "node:path";
+import { displayInstallPath, installAgentIntegrations, parseAgentName } from "./agents.js";
 import { benchmarkSnapshot } from "./benchmark.js";
 import { initializeConfig, inspectConfiguredCompose, loadConfig } from "./config.js";
 import { assertDockerReady } from "./docker.js";
 import { applyDoctorFixes, auditState, inspectDockerProjects } from "./doctor.js";
 import { BranchLiftError } from "./errors.js";
 import { currentBranch, discoverRepo } from "./git.js";
+import { runMcpServer } from "./mcp.js";
 import { humanBytes, safeSlug } from "./paths.js";
+import { previewInstances, readInstanceLogs } from "./preview.js";
 import {
   attachInstance,
   destroyInstance,
+  ensureAttachedInstance,
   execInInstance,
+  instanceContext,
   resetInstance,
   spawnInstance,
   startInstance,
@@ -22,8 +27,7 @@ import {
 import { createSnapshot } from "./snapshot.js";
 import { deleteSnapshot, listInstances, listSnapshots } from "./state.js";
 import type { ComposeInspection, InstanceMetadata } from "./types.js";
-
-const version = "1.0.0";
+import { version } from "./version.js";
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const args = [...argv];
@@ -40,6 +44,53 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   try {
     const repo = await discoverRepo();
     switch (command) {
+      case "mcp": {
+        assertNoArgs(args);
+        await runMcpServer(repo);
+        return 0;
+      }
+      case "agents": {
+        const action = args.shift();
+        if (action !== "install") throw new BranchLiftError("Usage: branchlift agents install [all|codex|claude|cursor]");
+        const dryRun = takeFlag(args, "--dry-run");
+        const json = takeFlag(args, "--json");
+        const selected = parseAgentName(args.shift() ?? "all");
+        assertNoArgs(args);
+        const results = await installAgentIntegrations(repo, selected, !dryRun);
+        if (json) console.log(JSON.stringify({ dryRun, results }, null, 2));
+        else {
+          for (const result of results) {
+            const verb = result.changed ? (dryRun ? "would update" : "updated") : "already configured";
+            console.log(`${result.agent} ${result.kind}: ${verb} ${displayInstallPath(repo, result.path)}`);
+          }
+          if (!dryRun) console.log("Agent hooks will attach or reuse the current branch backend on session start.");
+        }
+        return 0;
+      }
+      case "hook": {
+        const action = args.shift();
+        if (action !== "attach") throw new BranchLiftError("Usage: branchlift hook attach [--format claude|cursor]");
+        const format = takeOption(args, "--format") ?? "claude";
+        if (format !== "claude" && format !== "cursor") throw new BranchLiftError("--format must be claude or cursor.");
+        assertNoArgs(args);
+        let context: string;
+        try {
+          const config = await loadConfig(repo);
+          const inspection = await inspectConfiguredCompose(repo, config);
+          const branch = await currentBranch(repo);
+          const ensured = await ensureAttachedInstance(repo, config, inspection, branch, {
+            snapshot: config.snapshot.default,
+            start: true,
+            quiet: true,
+          });
+          context = `BranchLift backend ${ensured.action} for ${branch}. Context: ${JSON.stringify(instanceContext(ensured.instance))}`;
+        } catch (error) {
+          context = `BranchLift automatic attach skipped: ${errorText(error)}`;
+        }
+        if (format === "cursor") console.log(JSON.stringify({ additional_context: context }));
+        else console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context } }));
+        return 0;
+      }
       case "init": {
         const composeFiles = takeOptions(args, "--compose");
         const dryRun = takeFlag(args, "--dry-run");
@@ -120,6 +171,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           snapshot: snapshotOption ?? config.snapshot.default,
           start: !noStart,
           agentCommand,
+          quiet: json,
         });
         if (json) console.log(JSON.stringify(instance, null, 2));
         else printInstance(instance);
@@ -141,6 +193,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           snapshot: snapshotOption ?? config.snapshot.default,
           start: !noStart,
           agentCommand,
+          quiet: json,
         });
         if (json) console.log(JSON.stringify(instance, null, 2));
         else printInstance(instance);
@@ -202,6 +255,30 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const instances = await listInstances(repo);
         if (json) console.log(JSON.stringify(instances, null, 2));
         else printInstances(instances);
+        return 0;
+      }
+      case "preview": {
+        const json = takeFlag(args, "--json");
+        const branch = args.shift();
+        assertNoArgs(args);
+        const previews = await previewInstances(repo, branch);
+        if (json) console.log(JSON.stringify(previews, null, 2));
+        else printPreviews(previews);
+        return 0;
+      }
+      case "logs": {
+        const service = takeOption(args, "--service");
+        const tailValue = takeOption(args, "--tail");
+        const follow = takeFlag(args, "--follow");
+        const timestamps = takeFlag(args, "--timestamps");
+        const branch = args.shift() ?? await currentBranch(repo);
+        assertNoArgs(args);
+        const tail = tailValue === undefined ? 200 : Number.parseInt(tailValue, 10);
+        if (!Number.isInteger(tail) || tail < 1 || tail > 10000) {
+          throw new BranchLiftError("--tail must be an integer between 1 and 10000.");
+        }
+        const output = await readInstanceLogs(repo, branch, { ...(service === undefined ? {} : { service }), tail, follow, timestamps });
+        if (!follow && output !== "") console.log(output);
         return 0;
       }
       case "doctor": {
@@ -311,6 +388,24 @@ function printInstances(instances: InstanceMetadata[]): void {
   }
 }
 
+function printPreviews(previews: Awaited<ReturnType<typeof previewInstances>>): void {
+  if (previews.length === 0) {
+    console.log("No BranchLift instances for this repository.");
+    return;
+  }
+  for (const preview of previews) {
+    const live = preview.services === undefined
+      ? "Docker unavailable"
+      : preview.services.length === 0
+        ? "no containers"
+        : preview.services.map((service) => `${service.service}:${service.state}${service.health ? `/${service.health}` : ""}`).join(", ");
+    console.log(`${preview.branch} — ${preview.status} — ${live}`);
+    if (preview.endpoints.length === 0) console.log("  no published endpoints");
+    for (const endpoint of preview.endpoints) console.log(`  ${endpoint.service}:${endpoint.target} -> ${endpoint.url}`);
+    console.log(`  worktree: ${preview.worktreePath}`);
+  }
+}
+
 function printSnapshots(snapshots: Awaited<ReturnType<typeof listSnapshots>>): void {
   if (snapshots.length === 0) {
     console.log("No BranchLift snapshots for this repository.");
@@ -365,6 +460,11 @@ function printError(error: unknown): void {
   console.error(`error: ${String(error)}`);
 }
 
+function errorText(error: unknown): string {
+  if (error instanceof BranchLiftError) return [error.message, error.hint].filter(Boolean).join(" ");
+  return error instanceof Error ? error.message : String(error);
+}
+
 function requirePositional(args: string[], name: string): string {
   const value = args.shift();
   if (value === undefined || value.startsWith("-")) throw new BranchLiftError(`Missing required argument: ${name}`);
@@ -414,15 +514,22 @@ Usage:
   branchlift exec BRANCH -- COMMAND ...
   branchlift reset BRANCH [--no-start]
   branchlift list [--json]
+  branchlift preview [BRANCH] [--json]
+  branchlift logs [BRANCH] [--service NAME] [--tail N] [--follow] [--timestamps]
   branchlift destroy BRANCH [--worktree]
   branchlift doctor [--fix] [--json]
   branchlift benchmark [SNAPSHOT] [--iterations N]
+  branchlift agents install [all|codex|claude|cursor] [--dry-run] [--json]
+  branchlift mcp
 
 Examples:
   branchlift snapshot dev
   branchlift spawn fix-auth -- codex
   branchlift spawn billing -- claude
   branchlift attach -- codex
+  branchlift agents install all
+  branchlift preview
+  branchlift logs fix-auth --service api --tail 100
   branchlift reset fix-auth
   branchlift exec fix-auth -- npm test
 

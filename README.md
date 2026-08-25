@@ -27,7 +27,7 @@ BranchLift prepares one stopped, immutable golden snapshot and clones its state 
 
 ## Current status
 
-**v1.0** covers PostgreSQL 16, MySQL 8.4 LTS, and Redis 7 in one real Docker end-to-end contract. The test creates two environments, mutates both SQL databases in one branch, proves the other branch remains at golden state, resets the changed branch, and verifies both databases again. It also covers attach ownership, lifecycle locking, context-aware child commands, and conservative crash recovery.
+**v1.1** covers PostgreSQL 16, MySQL 8.4 LTS, and Redis 7 in one real Docker end-to-end contract. It also adds automatic Codex/Claude/Cursor attachment, a local STDIO MCP server, live endpoint previews, and Compose log access. The test creates two environments, mutates both SQL databases in one branch, proves the other branch remains at golden state, resets the changed branch, and verifies both databases again.
 
 Supported today:
 
@@ -45,26 +45,26 @@ Supported today:
 - cross-process snapshot and instance locks with stale-owner diagnosis;
 - context-aware host commands through `branchlift exec`;
 - crash recovery for abandoned snapshot builds and instance creation;
-- attachment to worktrees already created by Codex, Claude, an IDE, or the user.
+- attachment to worktrees already created by Codex, Claude, an IDE, or the user;
+- idempotent session-start hooks for Codex, Claude Code, and Cursor;
+- a local MCP server exposing attach, list, preview, and logs;
+- live service/health inspection through `preview` and targeted Compose logs.
 - pinned compatibility contracts for Langfuse, n8n Hosting, Docmost, Twenty, and Immich.
 
 MongoDB, Kafka, MinIO, Windows, Podman, and live production imports are not yet claimed as production-ready. Generic named volumes are isolated, but a database-specific production claim requires its own crash-consistency E2E contract.
 
-## Install from this checkout
+## Install
 
 Requirements: Node.js 22+, Git, Docker, and Docker Compose 2.24.4+.
 
 ```bash
-npm install
-npm run build
-npm install -g .
+npm install -g branchlift
 
-branchlift --version
+# or
+brew install muratkomurcu/tap/branchlift
 ```
 
-Ordinary pushes never publish. The release workflow is ready to publish the reviewed package with npm provenance when a GitHub Release is created; until the first release, install from this checkout or its tarball.
-
-See [docs/INSTALL.md](docs/INSTALL.md) for local, tarball, and future npm installation paths.
+See [docs/INSTALL.md](docs/INSTALL.md) for requirements, source installation, and package verification.
 
 ## Quick start
 
@@ -99,6 +99,22 @@ branchlift attach -- codex
 ```
 
 Attached worktrees are recorded as externally owned. BranchLift manages their backend state but never removes the worktree itself.
+
+Install automatic session-start attachment and the project-scoped MCP server without replacing existing agent settings:
+
+```bash
+branchlift agents install all
+git add .codex .claude .cursor .mcp.json
+```
+
+Use `codex`, `claude`, or `cursor` instead of `all` to configure only one client. Codex asks you to review and trust a new project hook before its first run.
+
+Inspect exact ports and live Compose service health, then read one service's logs:
+
+```bash
+branchlift preview
+branchlift logs agent/fix-auth --service postgres --tail 100
+```
 
 Run tests, migrations, or another tool inside an existing instance's worktree and environment:
 
@@ -188,9 +204,13 @@ branchlift stop BRANCH
 branchlift exec BRANCH -- COMMAND ...
 branchlift reset BRANCH [--no-start]
 branchlift list [--json]
+branchlift preview [BRANCH] [--json]
+branchlift logs [BRANCH] [--service NAME] [--tail N] [--follow] [--timestamps]
 branchlift destroy BRANCH [--worktree]
 branchlift doctor [--fix] [--json]
 branchlift benchmark [SNAPSHOT] [--iterations N] [--json]
+branchlift agents install [all|codex|claude|cursor] [--dry-run] [--json]
+branchlift mcp
 ```
 
 When an agent is launched, BranchLift supplies:
@@ -256,7 +276,9 @@ Measure clone latency against a forced full-copy baseline on your machine:
 branchlift benchmark dev --iterations 10
 ```
 
-For a database-independent, reproducible fixture use `npm run benchmark:synthetic -- --size-mib 256 --iterations 7`. Methodology and recorded evidence are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+For a database-independent fixture use `npm run benchmark:synthetic -- --size-mib 256 --iterations 7`. For the pinned Docmost comparison use `npm run benchmark:docmost -- --dataset-mib 128 --iterations 3`.
+
+The recorded Docmost result is deliberately not presented as a win: its real APFS state clone was 2.51× faster than full copy, but the complete HTTP-ready path was 0.82× because Docker Desktop starts the bind-mounted PostgreSQL state more slowly. Methodology, raw evidence, and the negative controls are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Development
 

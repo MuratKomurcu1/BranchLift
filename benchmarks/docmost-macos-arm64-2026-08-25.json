@@ -1,0 +1,33 @@
+{
+  "project": "Docmost",
+  "sourceCommit": "cd597f0161ab0221cae912cd9f8f71e2da6e607d",
+  "datasetApproxMiB": 128,
+  "datasetRows": 131072,
+  "iterations": 3,
+  "baselineSamplesMs": [3280.9, 3319.04, 3292.47],
+  "branchliftSamplesMs": [4017.47, 4269.25, 3973.64],
+  "baselineMedianMs": 3292.47,
+  "branchliftMedianMs": 4017.47,
+  "endToEndSpeedup": 0.82,
+  "stateCloneBenchmark": {
+    "logicalBytes": 375546151,
+    "strategy": "apfs-clone",
+    "cloneSamplesMs": [205.86, 204.08, 190.81],
+    "fullCopySamplesMs": [511.91, 515.9, 481.81],
+    "cloneMedianMs": 204.08,
+    "fullCopyMedianMs": 511.91,
+    "speedup": 2.51
+  },
+  "imageDigests": {
+    "docmost/docmost:latest": "docmost/docmost@sha256:41c8d777cf23c74e78f94e676aec328b7d7856f48df5e573543dac68d371e37c",
+    "postgres:18": "postgres@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941",
+    "redis:8": "redis@sha256:691577adaf11927f4bb8871d40a5dd69a5c300d4453b742e8f6383c3e6e8d2e1"
+  },
+  "platform": {
+    "node": "v26.7.0",
+    "os": "darwin/arm64",
+    "docker": "29.7.2",
+    "compose": "5.3.1",
+    "filesystem": "APFS"
+  }
+}
