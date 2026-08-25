@@ -4,9 +4,36 @@ import { parse, stringify } from "yaml";
 import { findComposeFile, findComposeFiles, inspectCompose, relativeComposePath } from "./compose.js";
 import { BranchLiftError } from "./errors.js";
 import { pathExists } from "./paths.js";
-import type { ComposeInspection, BranchLiftConfig, RepoInfo, SeedStep } from "./types.js";
+import type {
+  ComposeInspection,
+  BranchLiftConfig,
+  RepoInfo,
+  SandboxBackend,
+  SandboxNetwork,
+  SecretDefinition,
+  SecretScope,
+  SeedStep,
+  SecurityConfig,
+  UiConfig,
+} from "./types.js";
 
 export const configFileName = "branchlift.yaml";
+
+export const defaultSecurityConfig: SecurityConfig = {
+  sandbox: {
+    backend: "docker",
+    image: "node:22-bookworm-slim",
+    network: "backend",
+    readOnlyRoot: true,
+    memory: "4g",
+    cpus: 2,
+    pidsLimit: 512,
+  },
+  allowHostAgentCommands: false,
+  allowSecretCommands: false,
+};
+
+export const defaultUiConfig: UiConfig = { host: "127.0.0.1", port: 7788 };
 
 export async function initializeConfig(
   repo: RepoInfo,
@@ -75,13 +102,27 @@ export async function loadConfig(repo: RepoInfo): Promise<BranchLiftConfig> {
   const healthTimeoutSeconds = requirePositiveInteger(snapshot.healthTimeoutSeconds, "snapshot.healthTimeoutSeconds");
   const copyFiles = stringArray(worktree.copyFiles, "worktree.copyFiles");
   const seed = parseSeed(snapshot.seed);
+  const security = raw.security === undefined ? undefined : parseSecurity(raw.security);
+  const secrets = raw.secrets === undefined ? undefined : parseSecrets(raw.secrets);
+  const ui = raw.ui === undefined ? undefined : parseUi(raw.ui);
 
   return {
     version: 1,
     compose: { files: [...new Set(files)], statefulServices },
     snapshot: { default: defaultSnapshot, healthTimeoutSeconds, seed },
     worktree: { copyFiles },
+    ...(security === undefined ? {} : { security }),
+    ...(secrets === undefined ? {} : { secrets }),
+    ...(ui === undefined ? {} : { ui }),
   };
+}
+
+export function effectiveSecurity(config: BranchLiftConfig): SecurityConfig {
+  return config.security ?? structuredClone(defaultSecurityConfig);
+}
+
+export function effectiveUi(config: BranchLiftConfig): UiConfig {
+  return config.ui ?? { ...defaultUiConfig };
 }
 
 export async function inspectConfiguredCompose(
@@ -133,6 +174,91 @@ function parseSeed(value: unknown): SeedStep[] {
   });
 }
 
+function parseSecurity(value: unknown): SecurityConfig {
+  const map = requireMap(value, "security");
+  assertKnownKeys(map, ["sandbox", "allowHostAgentCommands", "allowSecretCommands"], "security");
+  const sandbox = requireMap(map.sandbox, "security.sandbox");
+  assertKnownKeys(
+    sandbox,
+    ["backend", "image", "network", "readOnlyRoot", "memory", "cpus", "pidsLimit"],
+    "security.sandbox",
+  );
+  const backend = enumValue(sandbox.backend, ["docker", "host"] as const, "security.sandbox.backend");
+  const network = enumValue(sandbox.network, ["none", "backend", "outbound"] as const, "security.sandbox.network");
+  return {
+    sandbox: {
+      backend: backend as SandboxBackend,
+      image: requireString(sandbox.image, "security.sandbox.image"),
+      network: network as SandboxNetwork,
+      readOnlyRoot: requireBoolean(sandbox.readOnlyRoot, "security.sandbox.readOnlyRoot"),
+      memory: requireString(sandbox.memory, "security.sandbox.memory"),
+      cpus: requirePositiveNumber(sandbox.cpus, "security.sandbox.cpus"),
+      pidsLimit: requirePositiveInteger(sandbox.pidsLimit, "security.sandbox.pidsLimit"),
+    },
+    allowHostAgentCommands: requireBoolean(map.allowHostAgentCommands, "security.allowHostAgentCommands"),
+    allowSecretCommands: requireBoolean(map.allowSecretCommands, "security.allowSecretCommands"),
+  };
+}
+
+function parseSecrets(value: unknown): Record<string, SecretDefinition> {
+  const map = requireMap(value, "secrets");
+  const result: Record<string, SecretDefinition> = {};
+  for (const [name, raw] of Object.entries(map)) {
+    if (!/^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/.test(name)) throw new BranchLiftError(`Invalid secret name: ${name}`);
+    const item = requireMap(raw, `secrets.${name}`);
+    assertKnownKeys(item, ["source", "target", "scopes", "required"], `secrets.${name}`);
+    const source = requireMap(item.source, `secrets.${name}.source`);
+    assertKnownKeys(source, ["env", "file", "command"], `secrets.${name}.source`);
+    const sourceKinds = ["env", "file", "command"].filter((key) => source[key] !== undefined);
+    if (sourceKinds.length !== 1) {
+      throw new BranchLiftError(`secrets.${name}.source must define exactly one of env, file, or command.`);
+    }
+    let parsedSource: SecretDefinition["source"];
+    if (source.env !== undefined) parsedSource = { env: requireEnvironmentName(source.env, `secrets.${name}.source.env`) };
+    else if (source.file !== undefined) parsedSource = { file: requireString(source.file, `secrets.${name}.source.file`) };
+    else {
+      const command = stringArray(source.command, `secrets.${name}.source.command`);
+      if (command.length === 0) throw new BranchLiftError(`secrets.${name}.source.command must not be empty.`);
+      parsedSource = { command };
+    }
+    const target = requireMap(item.target, `secrets.${name}.target`);
+    assertKnownKeys(target, ["env", "file"], `secrets.${name}.target`);
+    const targetKinds = ["env", "file"].filter((key) => target[key] !== undefined);
+    if (targetKinds.length !== 1) {
+      throw new BranchLiftError(`secrets.${name}.target must define exactly one of env or file.`);
+    }
+    const rawScopes = stringArray(item.scopes, `secrets.${name}.scopes`);
+    const scopes = rawScopes.map((scope) => enumValue(
+      scope,
+      ["compose", "exec", "agent", "sandbox"] as const,
+      `secrets.${name}.scopes`,
+    ) as SecretScope);
+    if (scopes.length === 0) throw new BranchLiftError(`secrets.${name}.scopes must not be empty.`);
+    const parsedTarget: SecretDefinition["target"] = target.env !== undefined
+      ? { env: requireEnvironmentName(target.env, `secrets.${name}.target.env`) }
+      : { file: requireSecretTargetFile(target.file, `secrets.${name}.target.file`) };
+    if ("file" in parsedTarget && scopes.some((scope) => scope !== "sandbox")) {
+      throw new BranchLiftError(`secrets.${name} file targets currently support only the sandbox scope.`);
+    }
+    result[name] = {
+      source: parsedSource,
+      target: parsedTarget,
+      scopes: [...new Set(scopes)],
+      required: requireBoolean(item.required, `secrets.${name}.required`),
+    };
+  }
+  return result;
+}
+
+function parseUi(value: unknown): UiConfig {
+  const map = requireMap(value, "ui");
+  assertKnownKeys(map, ["host", "port"], "ui");
+  return {
+    host: enumValue(map.host, ["127.0.0.1", "::1"] as const, "ui.host"),
+    port: requirePort(map.port, "ui.port"),
+  };
+}
+
 function requireMap(value: unknown, name: string): Record<string, unknown> {
   if (!isMap(value)) throw new BranchLiftError(`${name} must be a mapping.`);
   return value;
@@ -141,6 +267,24 @@ function requireMap(value: unknown, name: string): Record<string, unknown> {
 function requireString(value: unknown, name: string): string {
   if (typeof value !== "string" || value.trim() === "") throw new BranchLiftError(`${name} must be a non-empty string.`);
   return value;
+}
+
+function requireEnvironmentName(value: unknown, name: string): string {
+  const result = requireString(value, name);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(result)) throw new BranchLiftError(`${name} must be a valid environment variable name.`);
+  return result;
+}
+
+function requireSecretTargetFile(value: unknown, name: string): string {
+  const result = requireString(value, name);
+  if (!result.startsWith("/run/secrets/") || !/^\/run\/secrets\/[A-Za-z0-9._/-]+$/.test(result)) {
+    throw new BranchLiftError(`${name} must be an absolute path below /run/secrets/.`);
+  }
+  const segments = result.split("/");
+  if (segments.some((segment) => segment === ".." || segment === ".") || result.endsWith("/")) {
+    throw new BranchLiftError(`${name} must be a normalized secret file path.`);
+  }
+  return result;
 }
 
 function stringArray(value: unknown, name: string): string[] {
@@ -155,6 +299,37 @@ function requirePositiveInteger(value: unknown, name: string): number {
     throw new BranchLiftError(`${name} must be a positive integer.`);
   }
   return value;
+}
+
+function requirePositiveNumber(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new BranchLiftError(`${name} must be a positive number.`);
+  }
+  return value;
+}
+
+function requireBoolean(value: unknown, name: string): boolean {
+  if (typeof value !== "boolean") throw new BranchLiftError(`${name} must be a boolean.`);
+  return value;
+}
+
+function requirePort(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 65535) {
+    throw new BranchLiftError(`${name} must be an integer between 0 and 65535.`);
+  }
+  return value;
+}
+
+function enumValue<const T extends readonly string[]>(value: unknown, allowed: T, name: string): T[number] {
+  if (typeof value !== "string" || !allowed.includes(value)) {
+    throw new BranchLiftError(`${name} must be one of: ${allowed.join(", ")}.`);
+  }
+  return value as T[number];
+}
+
+function assertKnownKeys(value: Record<string, unknown>, allowed: string[], name: string): void {
+  const unexpected = Object.keys(value).find((key) => !allowed.includes(key));
+  if (unexpected !== undefined) throw new BranchLiftError(`${name}.${unexpected} is not supported.`);
 }
 
 function isMap(value: unknown): value is Record<string, unknown> {

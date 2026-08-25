@@ -1,8 +1,9 @@
 import { readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { instanceRoot, pathExists, readJson, repoDataRoot, snapshotRoot, writeJsonAtomic } from "./paths.js";
+import { instanceRoot, makeTreeOwnerWritable, pathExists, readJson, repoDataRoot, snapshotRoot, writeJsonAtomic } from "./paths.js";
 import type { InstanceMetadata, RepoInfo, SnapshotMetadata } from "./types.js";
 import { BranchLiftError } from "./errors.js";
+import { recordEventBestEffort } from "./events.js";
 import { snapshotLockScope, withLock } from "./lock.js";
 
 const metadataFile = "metadata.json";
@@ -73,6 +74,7 @@ export async function deleteSnapshot(repo: RepoInfo, name: string): Promise<void
   await withLock(repo, snapshotLockScope(name), "snapshot delete", async () => {
     await deleteSnapshotUnlocked(repo, name);
   });
+  await recordEventBestEffort(repo, "snapshot.delete", `Deleted immutable snapshot ${name}.`, { snapshot: name });
 }
 
 async function deleteSnapshotUnlocked(repo: RepoInfo, name: string): Promise<void> {
@@ -91,6 +93,7 @@ async function deleteSnapshotUnlocked(repo: RepoInfo, name: string): Promise<voi
   if (!resolvedRoot.startsWith(`${parent}/`)) {
     throw new BranchLiftError(`Refusing to remove a path outside BranchLift snapshots: ${resolvedRoot}`);
   }
+  await makeTreeOwnerWritable(resolvedRoot);
   await rm(resolvedRoot, { recursive: true, force: false });
 }
 
@@ -134,6 +137,7 @@ export function isInstanceMetadata(value: unknown): value is InstanceMetadata {
     && typeof value.createdAt === "string"
     && typeof value.updatedAt === "string"
     && ["creating", "running", "stopped", "failed"].includes(String(value.status))
+    && (value.secretEnvFile === undefined || typeof value.secretEnvFile === "string")
     && Array.isArray(value.ports);
 }
 
@@ -151,7 +155,12 @@ export function isSnapshotMetadata(value: unknown): value is SnapshotMetadata {
     && (value.importedFromProject === undefined || typeof value.importedFromProject === "string")
     && (value.postgresDataDirectories === undefined || postgresDataDirectories(value.postgresDataDirectories))
     && (value.mysqlLowerCaseTableNames === undefined
-      || (typeof value.mysqlLowerCaseTableNames === "number" && [0, 1, 2].includes(value.mysqlLowerCaseTableNames)));
+      || (typeof value.mysqlLowerCaseTableNames === "number" && [0, 1, 2].includes(value.mysqlLowerCaseTableNames)))
+    && (value.parentSnapshot === undefined || typeof value.parentSnapshot === "string")
+    && (value.sourceInstance === undefined || typeof value.sourceInstance === "string")
+    && (value.contentDigest === undefined || typeof value.contentDigest === "string")
+    && (value.manifestFile === undefined || typeof value.manifestFile === "string")
+    && (value.fileCount === undefined || (typeof value.fileCount === "number" && Number.isInteger(value.fileCount)));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

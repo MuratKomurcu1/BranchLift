@@ -27,7 +27,7 @@ The inspector parses a single Compose file directly. For multiple files it asks 
 - stateful services inferred from names and images;
 - isolation blockers, warnings, and actionable recommendations.
 
-Source Compose files are never rewritten. BranchLift generates an additional final override. Managed volume targets are replaced through Compose's unique-resource merge rules, preserving unrelated bind, tmpfs, secret, and config mounts. Ports use Compose's `!override` tag and omit fixed host ports so Docker assigns collision-free ports.
+Source Compose files are never rewritten. BranchLift generates an additional final override. Managed volume targets are replaced through Compose's unique-resource merge rules, preserving unrelated bind, tmpfs, secret, and config mounts. Ports use Compose's `!override` tag, omit fixed host ports so Docker assigns collision-free ports, and explicitly bind the result to IPv4 or IPv6 loopback.
 
 Every managed volume is initialized in temporary Docker-native storage, then exported from its cleanly stopped service as host-owned snapshot files. This preserves the filesystem behavior images expect during bootstrap and prevents image-owned directories (for example Redis data) from blocking snapshot deletion on Linux.
 
@@ -91,3 +91,37 @@ An ownerless `.building-*` directory is treated as an abandoned snapshot only wh
 Likewise, an instance left in `creating` without a live branch lock is moved to `failed`; its worktree and state remain intact. Any lingering Docker resources are handled by the same exact-label cleanup used for other stopped or failed instances.
 
 `branchlift doctor` reconciles metadata with managed files and Docker labels. Cleanup rechecks project ownership immediately before removing exact labeled containers, networks, or volumes. Diagnostic snapshot directories and user worktrees are preserved.
+
+## Content-addressed state graph
+
+Every new snapshot receives a deterministic SHA-256 manifest covering directories, regular files, symlinks, modes, sizes, volume names, and file content. Older snapshots are indexed lazily without mutating their volume data. A snapshot committed from an instance records its parent and source instance, so state evolves as an inspectable graph rather than a set of anonymous copies. `snapshot diff` compares manifests offline and reports added, removed, modified, unchanged, and shared logical bytes.
+
+Instance commit takes the instance lifecycle lock and target snapshot lock. If the stack is running, writers are stopped before cloning and the previous running state is restored afterward. A failure cannot publish a ready child snapshot and retains diagnostics.
+
+## Command sandbox
+
+The default agent boundary is an ephemeral Docker container. It receives only the selected worktree, a read-only context file, tmpfs-backed `/tmp` and `/run`, explicitly scoped secrets, and the selected network. The runtime drops all Linux capabilities, enables `no-new-privileges`, applies CPU/RAM/PID limits, uses a read-only root filesystem, runs as the invoking UID/GID, and never mounts the host Docker socket. Images must already exist locally.
+
+Backend-only mode creates a short-lived internal Docker network, attaches the running instance's Compose containers with service aliases, starts the sandbox on that network, and detaches/removes the network in `finally`. This removes direct egress from the sandbox while deliberately allowing access to the selected backend. Application containers keep their original networks, so a compromised backend service could still act as a proxy; this is stated as a boundary limitation rather than hidden.
+
+Host mode and `branchlift exec` are convenience execution paths with no security boundary. Both are kept distinct from `sandbox run` in the CLI, UI, posture report, and audit trail.
+
+## Secret broker
+
+Secret definitions contain sources and targets, not values. Values are resolved on demand from the host environment, an owner-selected file, or an explicitly enabled argument-vector command. Scope controls compose, exec, legacy host-agent, and sandbox injection independently. Environment values reject empty, multiline, NUL-containing, and oversized payloads. Sandbox file targets support multiline credentials, are restricted to `/run/secrets/...`, are written beneath private instance state, mounted read-only, and removed with the ephemeral sandbox directory.
+
+Compose env material is stored outside the worktree with mode `0600`; logs are redacted against that material. This protects against accidental commits and cross-user reads, not a malicious process running as the same host user. Environment injection is also visible to sufficiently privileged Docker inspection. Use file targets inside the sandbox when the tool supports them.
+
+## Local and remote control planes
+
+The UI binds only to loopback. A random 256-bit bearer token is placed in the URL fragment, moved to session storage, and never sent in the initial HTTP request or server logs. APIs require the token, reject foreign origins, cap request bodies, and emit no-store, CSP, frame, MIME, opener, resource, and referrer protections. Destructive operations require exact-name confirmation.
+
+SSH remotes use batch authentication, strict host-key checking, timeouts, optional explicit identity files, and no stored passwords or tokens. Lifecycle calls send a size-bounded JSON request over stdin to a hidden worker and accept only a correlated, framed response. The worker allowlists actions and validates every field; it is not an arbitrary remote-shell API. `remote setup` packages the installed BranchLift files locally, transfers them through stdin, installs below the remote user's home directory without `sudo`, verifies the binary, and then performs a protocol ping.
+
+The remote data plane has a separate fixed receiver. Code moves as a SHA-256-verified Git bundle whose `HEAD` must equal the declared commit. Snapshot planning compares SHA-256 blob inventories in bounded batches, after which only missing file bodies cross SSH. The receiver validates paths and symlinks, stores verified content-addressed blobs, materializes a private staging generation, recomputes the manifest, makes state read-only, and atomically publishes it. Existing snapshots are rehashed before a reuse receipt. `remote launch` composes worker bootstrap, code sync, state sync, optional explicit policy approval, and exact-commit spawn; a workspace lock and expected commit/policy digest bind the control-plane steps without a persistent daemon or Docker-in-Docker daemon.
+
+Live working-tree sync is a second, opt-in data contract. The sender enumerates Git tracked plus untracked-nonignored files and hashes a deterministic manifest. A plan request returns only mismatched paths and managed deletions. Apply sends exact framed bodies, then recalculates the plan under the instance lock before atomically replacing individual files. The receiver retains the last managed manifest outside the worktree and rehashes it on every cycle, so remote edits become conflicts. Native recursive watch events provide latency. A scheduled Git inventory plus mode/size/time fingerprint catches missed events without rehashing and contacting SSH when nothing changed; any fingerprint change runs the complete content protocol.
+
+Remote service access uses OpenSSH local forwarding, with the local endpoint on IPv4 loopback, the remote endpoint on recorded IPv4/IPv6 loopback, and a local ControlMaster socket for lifecycle. Server-alive options detect transport loss. While `remote dev` or the standalone tunnel watcher owns the session, a five-second health loop probes every local listener and recreates a failed tunnel set, reserving the previous per-service local ports when possible. The remote agent entry point accepts a bounded command argument vector, validates the synchronized commit and policy, and unconditionally selects the Docker sandbox backend; it does not evaluate a host shell string. Interactive TTY allocation occurs only for a terminal caller.
+
+Remote builds select a deterministic repository-specific Buildx builder using the `docker-container` driver. BuildKit's internal cache remains attached to that named builder across commands. Builder bootstrap, builds, cache inspection, and cache pruning share a repository lock. Successful builds apply a configurable, default-20-GB LRU cache ceiling; full prune addresses the exact builder and requires explicit confirmation. Canonical context and Dockerfile paths must remain within the root checkout or selected instance worktree. This build plane is trusted remote Docker infrastructure and is deliberately separate from the least-privilege agent sandbox.

@@ -305,6 +305,10 @@ export function generateOverride(
       for (const port of servicePorts) {
         lines.push(`      - target: ${port.target}`);
         lines.push(`        protocol: ${port.protocol}`);
+        // BranchLift environments are local control-plane resources. Even if
+        // the source Compose file publishes on every interface, randomized
+        // instance ports stay loopback-only.
+        lines.push(`        host_ip: ${quote(loopbackHost(port.hostIp))}`);
       }
     }
   }
@@ -440,9 +444,19 @@ function parsePort(value: unknown, service: string): PortBinding | undefined {
   if (isMap(value)) {
     const target = typeof value.target === "number" ? value.target : Number.parseInt(String(value.target ?? ""), 10);
     if (!Number.isInteger(target) || target <= 0 || target > 65535) return undefined;
-    return { service, target, protocol: value.protocol === "udp" ? "udp" : "tcp" };
+    const hostIp = typeof value.host_ip === "string" ? value.host_ip : undefined;
+    return {
+      service,
+      target,
+      protocol: value.protocol === "udp" ? "udp" : "tcp",
+      ...(hostIp === undefined ? {} : { hostIp }),
+    };
   }
   return undefined;
+}
+
+function loopbackHost(value: string | undefined): "127.0.0.1" | "::1" {
+  return value === "::1" || value === "[::1]" ? "::1" : "127.0.0.1";
 }
 
 function isBindSource(source: string): boolean {

@@ -3,7 +3,7 @@ import { mkdir, open, readFile, readdir, stat, unlink } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { BranchLiftError } from "./errors.js";
-import { pathExists, repoDataRoot, safeSlug } from "./paths.js";
+import { ensurePrivateStateRoot, pathExists, repoDataRoot, safeSlug } from "./paths.js";
 import type { RepoInfo } from "./types.js";
 
 const incompleteLockGraceMs = 5_000;
@@ -44,6 +44,7 @@ export async function acquireLock(
   scope: string,
   operation: string,
 ): Promise<{ path: string; metadata: LockMetadata }> {
+  await ensurePrivateStateRoot();
   const root = lockRoot(repo);
   await mkdir(root, { recursive: true });
   const path = lockPath(repo, scope);

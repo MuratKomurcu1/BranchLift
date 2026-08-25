@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { volumeDirectoryName } from "../src/compose.js";
-import { repoDataRoot } from "../src/paths.js";
+import { makeTreeOwnerWritable, repoDataRoot } from "../src/paths.js";
+import { trustSecurityPolicy } from "../src/policy.js";
 import { importSnapshot, type SnapshotImportAdapter } from "../src/snapshot.js";
 import type { BranchLiftConfig, ComposeInspection, RepoInfo } from "../src/types.js";
 
@@ -75,8 +76,10 @@ async function withState(run: (repo: RepoInfo) => Promise<void>): Promise<void> 
     key: "demo-key",
   };
   try {
+    await trustSecurityPolicy(repo, config());
     await run(repo);
   } finally {
+    await makeTreeOwnerWritable(stateHome).catch(() => undefined);
     if (previous === undefined) delete process.env.BRANCHLIFT_HOME;
     else process.env.BRANCHLIFT_HOME = previous;
     await rm(stateHome, { recursive: true, force: true });

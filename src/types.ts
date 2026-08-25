@@ -12,6 +12,45 @@ export interface BranchLiftConfig {
   worktree: {
     copyFiles: string[];
   };
+  security?: SecurityConfig;
+  secrets?: Record<string, SecretDefinition>;
+  ui?: UiConfig;
+}
+
+export type SandboxBackend = "docker" | "host";
+export type SandboxNetwork = "none" | "backend" | "outbound";
+
+export interface SecurityConfig {
+  sandbox: {
+    backend: SandboxBackend;
+    image: string;
+    network: SandboxNetwork;
+    readOnlyRoot: boolean;
+    memory: string;
+    cpus: number;
+    pidsLimit: number;
+  };
+  allowHostAgentCommands: boolean;
+  allowSecretCommands: boolean;
+}
+
+export type SecretScope = "compose" | "exec" | "agent" | "sandbox";
+
+export interface SecretDefinition {
+  source:
+    | { env: string }
+    | { file: string }
+    | { command: string[] };
+  target:
+    | { env: string }
+    | { file: string };
+  scopes: SecretScope[];
+  required: boolean;
+}
+
+export interface UiConfig {
+  host: "127.0.0.1" | "::1";
+  port: number;
 }
 
 export interface SeedStep {
@@ -39,6 +78,7 @@ export interface PortBinding {
   service: string;
   target: number;
   protocol: "tcp" | "udp";
+  hostIp?: string;
 }
 
 export interface ComposeInspection {
@@ -77,6 +117,11 @@ export interface SnapshotMetadata {
   importedFromProject?: string;
   postgresDataDirectories?: Record<string, string | false>;
   mysqlLowerCaseTableNames?: 0 | 1 | 2;
+  parentSnapshot?: string;
+  sourceInstance?: string;
+  contentDigest?: string;
+  manifestFile?: string;
+  fileCount?: number;
   error?: string;
 }
 
@@ -112,7 +157,55 @@ export interface InstanceMetadata {
   status: InstanceStatus;
   ports: PublishedPort[];
   copyStrategy: CopyStrategy;
+  secretEnvFile?: string;
   error?: string;
+}
+
+export interface SnapshotManifestEntry {
+  volume: string;
+  path: string;
+  kind: "file" | "directory" | "symlink";
+  size: number;
+  mode: number;
+  digest: string;
+}
+
+export interface SnapshotManifest {
+  version: 1;
+  snapshot: string;
+  createdAt: string;
+  digest: string;
+  logicalBytes: number;
+  entries: SnapshotManifestEntry[];
+}
+
+export type AuditEventLevel = "info" | "warning" | "error";
+
+export interface AuditEvent {
+  version: 1;
+  id: string;
+  timestamp: string;
+  repoKey: string;
+  kind: string;
+  level: AuditEventLevel;
+  message: string;
+  branch?: string;
+  snapshot?: string;
+  details?: Record<string, unknown>;
+}
+
+export interface RemoteDefinition {
+  version: 1;
+  name: string;
+  host: string;
+  user?: string;
+  port: number;
+  identityFile?: string;
+  repoPath: string;
+  binary: string;
+  managedBinary?: boolean;
+  lastSetupAt?: string;
+  createdAt: string;
 }
 
 export type CopyStrategy = "apfs-clone" | "linux-reflink" | "recursive-copy" | "empty";

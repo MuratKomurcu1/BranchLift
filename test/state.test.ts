@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BranchLiftError } from "../src/errors.js";
-import { pathExists, repoDataRoot, snapshotRoot } from "../src/paths.js";
+import { makeTreeReadOnly, pathExists, repoDataRoot, snapshotRoot } from "../src/paths.js";
 import {
   deleteSnapshot,
   isSnapshotMetadata,
@@ -24,6 +24,10 @@ test("lists snapshots newest first and deletes an unused snapshot", async () => 
       ["newer", "older"],
     );
 
+    const olderVolume = join(snapshotRoot(repo, "older"), "volumes", "db-data");
+    await mkdir(olderVolume, { recursive: true });
+    await writeFile(join(olderVolume, "state"), "immutable");
+    await makeTreeReadOnly(join(snapshotRoot(repo, "older"), "volumes"));
     await deleteSnapshot(repo, "older");
     assert.equal(await pathExists(snapshotRoot(repo, "older")), false);
     assert.deepEqual(

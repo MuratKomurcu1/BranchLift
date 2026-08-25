@@ -1,7 +1,8 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { generateOverride, volumeDirectoryName } from "./compose.js";
+import { effectiveSecurity, loadConfig } from "./config.js";
 import {
   assertDockerReady,
   composeDownBestEffort,
@@ -11,6 +12,7 @@ import {
   validateCompose,
 } from "./docker.js";
 import { BranchLiftError, errorDetail } from "./errors.js";
+import { recordEventBestEffort } from "./events.js";
 import { assertCommittedHead, createWorktree, removeCleanWorktree } from "./git.js";
 import { instanceLockScope, snapshotLockScope, withLock } from "./lock.js";
 import {
@@ -18,7 +20,7 @@ import {
   copyPrivateFile,
   createExclusiveDirectory,
   instanceRoot,
-  makeTreeContainerWritable,
+  makeTreeOwnerWritable,
   pathExists,
   repoDataRoot,
   safeSlug,
@@ -27,7 +29,9 @@ import {
   writeJsonAtomic,
 } from "./paths.js";
 import { runCommand } from "./process.js";
+import { assertSecurityPolicyTrusted } from "./policy.js";
 import { readInstanceMetadata, readSnapshotMetadata, writeInstanceMetadata } from "./state.js";
+import { materializeSecretEnv, mergeSecretEnvironment, redactInstanceText, resolveSecrets } from "./secrets.js";
 import { projectName } from "./snapshot.js";
 import type {
   ComposeInspection,
@@ -43,6 +47,7 @@ export interface SpawnOptions {
   start: boolean;
   agentCommand: string[];
   quiet?: boolean;
+  startPoint?: string;
 }
 
 export type AttachOptions = SpawnOptions;
@@ -69,11 +74,18 @@ export async function execInInstance(repo: RepoInfo, branch: string, command: st
   const [executable, ...args] = command;
   if (executable === undefined) throw new BranchLiftError("Missing command after --.");
   const contextFile = join(instanceRoot(repo, metadata.slug), "context.json");
+  const config = await loadConfig(repo);
+  await assertSecurityPolicyTrusted(repo, config);
+  const secrets = await resolveSecrets(repo, config, "exec");
   const result = await runCommand(executable, args, {
     cwd: metadata.worktreePath,
     stdio: "inherit",
     allowFailure: true,
-    env: instanceEnvironment(metadata, contextFile),
+    env: mergeSecretEnvironment(instanceEnvironment(metadata, contextFile), secrets),
+  });
+  await recordEventBestEffort(repo, "instance.exec", `Command completed in ${branch}.`, {
+    branch,
+    details: { executable, exitCode: result.exitCode },
   });
   return result.exitCode;
 }
@@ -85,6 +97,7 @@ export async function spawnInstance(
   branch: string,
   options: SpawnOptions,
 ): Promise<InstanceMetadata> {
+  await assertSecurityPolicyTrusted(repo, config);
   const metadata = await withLock(repo, instanceLockScope(branch), "spawn", async () => {
     const slug = safeSlug(branch);
     return await provisionInstanceLocked(
@@ -99,7 +112,12 @@ export async function spawnInstance(
       "spawn",
     );
   });
-  await launchAgent(metadata, join(instanceRoot(repo, metadata.slug), "context.json"), options.agentCommand);
+  await recordEventBestEffort(repo, "instance.spawn", `Created isolated backend for ${branch}.`, {
+    branch,
+    snapshot: metadata.snapshot,
+    details: { status: metadata.status, copyStrategy: metadata.copyStrategy },
+  });
+  await launchAgent(repo, config, metadata, join(instanceRoot(repo, metadata.slug), "context.json"), options.agentCommand);
   return metadata;
 }
 
@@ -110,6 +128,7 @@ export async function attachInstance(
   branch: string,
   options: AttachOptions,
 ): Promise<InstanceMetadata> {
+  await assertSecurityPolicyTrusted(repo, config);
   const metadata = await withLock(repo, instanceLockScope(branch), "attach", async () => {
     return await provisionInstanceLocked(
       repo,
@@ -123,7 +142,12 @@ export async function attachInstance(
       "attach",
     );
   });
-  await launchAgent(metadata, join(instanceRoot(repo, metadata.slug), "context.json"), options.agentCommand);
+  await recordEventBestEffort(repo, "instance.attach", `Attached backend state to ${branch}.`, {
+    branch,
+    snapshot: metadata.snapshot,
+    details: { status: metadata.status },
+  });
+  await launchAgent(repo, config, metadata, join(instanceRoot(repo, metadata.slug), "context.json"), options.agentCommand);
   return metadata;
 }
 
@@ -134,6 +158,7 @@ export async function ensureAttachedInstance(
   branch: string,
   options: EnsureOptions,
 ): Promise<{ instance: InstanceMetadata; action: "attached" | "started" | "reused" }> {
+  await assertSecurityPolicyTrusted(repo, config);
   return await withLock(repo, instanceLockScope(branch), "ensure attach", async () => {
     const slug = safeSlug(branch);
     if (await pathExists(instanceRoot(repo, slug))) {
@@ -193,7 +218,7 @@ async function provisionInstanceLocked(
     const snapshot = await readSnapshotMetadata(repo, options.snapshot);
     if (snapshot.status !== "ready") throw new BranchLiftError(`Snapshot is not ready: ${options.snapshot}`);
     if (await pathExists(root)) throw new BranchLiftError(`Instance already exists for branch ${branch}.`);
-    if (createGitWorktree) await createWorktree(repo, branch, worktreePath);
+    if (createGitWorktree) await createWorktree(repo, branch, worktreePath, options.startPoint);
     else if (!(await pathExists(worktreePath))) throw new BranchLiftError(`Worktree is missing: ${worktreePath}`);
     await createExclusiveDirectory(root);
 
@@ -234,22 +259,19 @@ async function provisionInstanceLocked(
 
   try {
     const hostUserServices = new Set<string>();
-    const databaseServices = new Set([...inspection.postgresServices, ...inspection.mysqlServices]);
-    const genericVolumeSources = new Set(
-      inspection.volumes
-        .filter((volume) => !databaseServices.has(volume.service) && !volume.readOnly)
-        .map((volume) => volume.source),
-    );
     const copyStrategies = await Promise.all(snapshot.volumeNames.map(async (volume) => {
       const source = join(snapshotRoot(repo, options.snapshot), "volumes", volumeDirectoryName(volume));
       const destination = join(volumeRoot, volumeDirectoryName(volume));
       const strategy = await cloneDirectory(source, destination);
-      if (genericVolumeSources.has(volume)) await makeTreeContainerWritable(destination);
+      await makeTreeOwnerWritable(destination);
       return strategy;
     }));
     metadata.copyStrategy = copyStrategies.reduce(mergeStrategies, metadata.copyStrategy);
 
     await copyConfiguredFiles(repo, config, worktreePath);
+    const secretEnvFile = await materializeSecretEnv(repo, slug, await resolveSecrets(repo, config, "compose"));
+    if (secretEnvFile === undefined) delete metadata.secretEnvFile;
+    else metadata.secretEnvFile = secretEnvFile;
     await writeFile(
       overrideFile,
       generateOverride(inspection, volumeRoot, {
@@ -262,7 +284,13 @@ async function provisionInstanceLocked(
       }),
     );
     await writeInstanceMetadata(repo, slug, metadata);
-    const runtime = { cwd: worktreePath, composeFiles, overrideFile, project: composeProject };
+    const runtime = {
+      cwd: worktreePath,
+      composeFiles,
+      overrideFile,
+      project: composeProject,
+      ...(metadata.secretEnvFile === undefined ? {} : { envFile: metadata.secretEnvFile }),
+    };
     await validateCompose(runtime);
 
     if (options.start) {
@@ -291,10 +319,16 @@ export async function startInstance(
   branch: string,
   options: StartOptions,
 ): Promise<InstanceMetadata> {
+  await assertSecurityPolicyTrusted(repo, config);
   const metadata = await withLock(repo, instanceLockScope(branch), "start", async () => {
     return await startInstanceLocked(repo, config, inspection, branch, options.quiet ?? false);
   });
-  await launchAgent(metadata, join(instanceRoot(repo, metadata.slug), "context.json"), options.agentCommand);
+  await recordEventBestEffort(repo, "instance.start", `Started ${branch}.`, {
+    branch,
+    snapshot: metadata.snapshot,
+    details: { ports: metadata.ports.length },
+  });
+  await launchAgent(repo, config, metadata, join(instanceRoot(repo, metadata.slug), "context.json"), options.agentCommand);
   return metadata;
 }
 
@@ -313,6 +347,9 @@ async function startInstanceLocked(
   }
   const contextFile = join(instanceRoot(repo, slug), "context.json");
   try {
+    const secretEnvFile = await materializeSecretEnv(repo, slug, await resolveSecrets(repo, config, "compose"));
+    if (secretEnvFile === undefined) delete metadata.secretEnvFile;
+    else metadata.secretEnvFile = secretEnvFile;
     await assertDockerReady();
     const runtime = runtimeFromMetadata(metadata);
     await validateCompose(runtime);
@@ -332,9 +369,14 @@ async function startInstanceLocked(
 }
 
 export async function stopInstance(repo: RepoInfo, branch: string): Promise<InstanceMetadata> {
-  return await withLock(repo, instanceLockScope(branch), "stop", async () => {
+  const metadata = await withLock(repo, instanceLockScope(branch), "stop", async () => {
     return await stopInstanceLocked(repo, branch);
   });
+  await recordEventBestEffort(repo, "instance.stop", `Stopped ${branch}; state preserved.`, {
+    branch,
+    snapshot: metadata.snapshot,
+  });
+  return metadata;
 }
 
 async function stopInstanceLocked(repo: RepoInfo, branch: string): Promise<InstanceMetadata> {
@@ -359,9 +401,16 @@ export async function resetInstance(
   branch: string,
   start: boolean,
 ): Promise<InstanceMetadata> {
-  return await withLock(repo, instanceLockScope(branch), "reset", async () => {
+  await assertSecurityPolicyTrusted(repo, config);
+  const metadata = await withLock(repo, instanceLockScope(branch), "reset", async () => {
     return await resetInstanceLocked(repo, config, inspection, branch, start);
   });
+  await recordEventBestEffort(repo, "instance.reset", `Reset ${branch} to immutable snapshot ${metadata.snapshot}.`, {
+    branch,
+    snapshot: metadata.snapshot,
+    details: { status: metadata.status, copyStrategy: metadata.copyStrategy },
+  });
+  return metadata;
 }
 
 async function resetInstanceLocked(
@@ -395,17 +444,11 @@ async function resetInstanceLocked(
     pendingOverrideFile = overrideFile;
     await createExclusiveDirectory(volumeRoot);
     const hostUserServices = new Set<string>();
-    const databaseServices = new Set([...inspection.postgresServices, ...inspection.mysqlServices]);
-    const genericVolumeSources = new Set(
-      inspection.volumes
-        .filter((volume) => !databaseServices.has(volume.service) && !volume.readOnly)
-        .map((volume) => volume.source),
-    );
     const copyStrategies = await Promise.all(snapshot.volumeNames.map(async (volume) => {
       const source = join(snapshotRoot(repo, metadata.snapshot), "volumes", volumeDirectoryName(volume));
       const destination = join(volumeRoot, volumeDirectoryName(volume));
       const strategy = await cloneDirectory(source, destination);
-      if (genericVolumeSources.has(volume)) await makeTreeContainerWritable(destination);
+      await makeTreeOwnerWritable(destination);
       return strategy;
     }));
     const copyStrategy = copyStrategies.reduce(mergeStrategies, "empty" as CopyStrategy);
@@ -421,11 +464,15 @@ async function resetInstanceLocked(
         mysqlLowerCaseTableNames: snapshot.mysqlLowerCaseTableNames ?? 1,
       }),
     );
+    const secretEnvFile = await materializeSecretEnv(repo, slug, await resolveSecrets(repo, config, "compose"));
+    if (secretEnvFile === undefined) delete metadata.secretEnvFile;
+    else metadata.secretEnvFile = secretEnvFile;
     const runtime = {
       cwd: metadata.worktreePath,
       composeFiles: (metadata.composeFiles ?? [metadata.composeFile]).map((file) => resolve(metadata.worktreePath, file)),
       overrideFile,
       project: metadata.composeProject,
+      ...(metadata.secretEnvFile === undefined ? {} : { envFile: metadata.secretEnvFile }),
     };
     await validateCompose(runtime);
 
@@ -480,9 +527,14 @@ export async function destroyInstance(
   branch: string,
   removeWorktree: boolean,
 ): Promise<{ runtimeRemoved: boolean; worktreeRemoved: boolean }> {
-  return await withLock(repo, instanceLockScope(branch), "destroy", async () => {
+  const result = await withLock(repo, instanceLockScope(branch), "destroy", async () => {
     return await destroyInstanceLocked(repo, branch, removeWorktree);
   });
+  await recordEventBestEffort(repo, "instance.destroy", `Destroyed runtime state for ${branch}.`, {
+    branch,
+    details: result,
+  });
+  return result;
 }
 
 export async function destroyInstanceIfUnchanged(
@@ -562,18 +614,32 @@ export function instanceContext(metadata: InstanceMetadata): Record<string, unkn
   };
 }
 
-async function launchAgent(metadata: InstanceMetadata, contextFile: string, agentCommand: string[]): Promise<void> {
+async function launchAgent(
+  repo: RepoInfo,
+  config: BranchLiftConfig,
+  metadata: InstanceMetadata,
+  contextFile: string,
+  agentCommand: string[],
+): Promise<void> {
   if (agentCommand.length === 0) return;
+  if (!effectiveSecurity(config).allowHostAgentCommands) {
+    throw new BranchLiftError(
+      "Host agent commands are disabled by the BranchLift security policy.",
+      `Run branchlift sandbox run ${metadata.branch} -- COMMAND, or explicitly set security.allowHostAgentCommands: true.`,
+    );
+  }
+  await assertSecurityPolicyTrusted(repo, config);
   const [command, ...args] = agentCommand;
   if (command === undefined) throw new BranchLiftError("Agent command is empty.");
+  const secrets = await resolveSecrets(repo, config, "agent");
   await runCommand(command, args, {
     cwd: metadata.worktreePath,
     stdio: "inherit",
-    env: instanceEnvironment(metadata, contextFile),
+    env: mergeSecretEnvironment(instanceEnvironment(metadata, contextFile), secrets),
   });
 }
 
-function instanceEnvironment(metadata: InstanceMetadata, contextFile: string): NodeJS.ProcessEnv {
+export function instanceEnvironment(metadata: InstanceMetadata, contextFile: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     BRANCHLIFT_INSTANCE: metadata.id,
@@ -594,7 +660,9 @@ function environmentName(value: string): string {
   return value.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "SERVICE";
 }
 
-async function copyConfiguredFiles(repo: RepoInfo, config: BranchLiftConfig, targetRoot: string): Promise<void> {
+export async function copyConfiguredFiles(repo: RepoInfo, config: BranchLiftConfig, targetRoot: string): Promise<void> {
+  const realRepoRoot = await realpath(repo.root);
+  const realTargetRoot = await realpath(targetRoot);
   for (const relativePath of config.worktree.copyFiles) {
     if (relativePath.includes("..") || resolve(repo.root, relativePath) === repo.root) {
       throw new BranchLiftError(`Unsafe worktree.copyFiles entry: ${relativePath}`);
@@ -605,9 +673,47 @@ async function copyConfiguredFiles(repo: RepoInfo, config: BranchLiftConfig, tar
       throw new BranchLiftError(`copyFiles entry escapes the repository: ${relativePath}`);
     }
     if (!(await pathExists(source)) || (await pathExists(destination))) continue;
-    await mkdir(dirname(destination), { recursive: true });
-    await copyPrivateFile(source, destination);
+    const sourceInfo = await lstat(source);
+    if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink()) {
+      throw new BranchLiftError(`worktree.copyFiles must reference a regular file, not a symlink: ${relativePath}`);
+    }
+    const realSource = await realpath(source);
+    if (!isWithin(realSource, realRepoRoot)) {
+      throw new BranchLiftError(`copyFiles source resolves outside the repository: ${relativePath}`);
+    }
+    const safeDestination = resolve(realTargetRoot, relative(targetRoot, destination));
+    await createSafeCopyParent(realTargetRoot, dirname(safeDestination));
+    await copyPrivateFile(source, safeDestination);
   }
+}
+
+async function createSafeCopyParent(targetRoot: string, destinationParent: string): Promise<void> {
+  const relativeParent = relative(targetRoot, destinationParent);
+  if (relativeParent === "") return;
+  if (relativeParent.startsWith("..") || resolve(targetRoot, relativeParent) !== destinationParent) {
+    throw new BranchLiftError(`copyFiles destination escapes the managed worktree: ${destinationParent}`);
+  }
+  let current = targetRoot;
+  for (const segment of relativeParent.split(sep)) {
+    current = join(current, segment);
+    try {
+      const info = await lstat(current);
+      if (info.isSymbolicLink() || !info.isDirectory()) {
+        throw new BranchLiftError(`copyFiles destination contains an unsafe path component: ${current}`);
+      }
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      await mkdir(current, { mode: 0o700 });
+    }
+  }
+  const resolvedParent = await realpath(destinationParent);
+  if (!isWithin(resolvedParent, targetRoot)) {
+    throw new BranchLiftError(`copyFiles destination resolves outside the managed worktree: ${destinationParent}`);
+  }
+}
+
+function isWithin(child: string, parent: string): boolean {
+  return child === parent || child.startsWith(`${parent}${sep}`);
 }
 
 function mergeStrategies(current: CopyStrategy, next: CopyStrategy): CopyStrategy {
@@ -630,6 +736,7 @@ export function runtimeFromMetadata(metadata: InstanceMetadata) {
     composeFiles: (metadata.composeFiles ?? [metadata.composeFile]).map((file) => resolve(metadata.worktreePath, file)),
     overrideFile: metadata.overrideFile,
     project: metadata.composeProject,
+    ...(metadata.secretEnvFile === undefined ? {} : { envFile: metadata.secretEnvFile }),
   };
 }
 
@@ -649,7 +756,7 @@ async function markInstanceFailed(
 ): Promise<void> {
   metadata.status = "failed";
   metadata.ports = [];
-  metadata.error = errorDetail(error);
+  metadata.error = await redactInstanceText(repo, slug, errorDetail(error)).catch(() => "Instance operation failed; diagnostic redaction was unavailable.");
   metadata.updatedAt = new Date().toISOString();
   await writeInstanceMetadata(repo, slug, metadata);
   await writeJsonAtomic(join(instanceRoot(repo, slug), "context.json"), instanceContext(metadata));

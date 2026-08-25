@@ -5,15 +5,40 @@ import { realpath } from "node:fs/promises";
 import { relative } from "node:path";
 import { displayInstallPath, installAgentIntegrations, parseAgentName } from "./agents.js";
 import { benchmarkSnapshot } from "./benchmark.js";
-import { initializeConfig, inspectConfiguredCompose, loadConfig } from "./config.js";
+import { effectiveSecurity, initializeConfig, inspectConfiguredCompose, loadConfig } from "./config.js";
 import { assertDockerReady } from "./docker.js";
 import { applyDoctorFixes, auditState, inspectDockerProjects } from "./doctor.js";
 import { BranchLiftError } from "./errors.js";
+import { listEvents } from "./events.js";
 import { currentBranch, discoverRepo } from "./git.js";
 import { collectGarbage, parseAge } from "./gc.js";
+import { diffSnapshots, ensureSnapshotManifest } from "./manifest.js";
 import { runMcpServer } from "./mcp.js";
-import { humanBytes, safeSlug } from "./paths.js";
+import { ensurePrivateStateRoot, humanBytes, safeSlug } from "./paths.js";
+import { inspectPolicyTrust, revokeSecurityPolicy, securityPolicyDigest, trustSecurityPolicy } from "./policy.js";
 import { previewInstances, readInstanceLogs } from "./preview.js";
+import { addRemote, callRemote, listRemotes, removeRemote, runRemoteWorker, setupRemote } from "./remote.js";
+import {
+  pushRemoteSnapshot,
+  runRemoteReceiver,
+  syncRemoteCode,
+  syncRemoteWorkingTree,
+  watchRemoteWorkingTree,
+} from "./remote-transfer.js";
+import {
+  inspectRemoteTunnel,
+  monitorRemoteTunnels,
+  runRemoteAgent,
+  runRemoteBuild,
+  runRemoteBuildWorker,
+  runRemoteCache,
+  runRemoteCacheWorker,
+  runRemoteSession,
+  startRemoteTunnels,
+  stopRemoteTunnels,
+} from "./remote-dev.js";
+import { runSandbox, sandboxPosture } from "./sandbox.js";
+import { inspectSecrets } from "./secrets.js";
 import {
   attachInstance,
   destroyInstance,
@@ -25,9 +50,11 @@ import {
   startInstance,
   stopInstance,
 } from "./runtime.js";
-import { createSnapshot, importSnapshot } from "./snapshot.js";
+import { commitSnapshotFromInstance, createSnapshot, importSnapshot } from "./snapshot.js";
 import { deleteSnapshot, listInstances, listSnapshots } from "./state.js";
-import type { ComposeInspection, InstanceMetadata } from "./types.js";
+import type { ComposeInspection, InstanceMetadata, RepoInfo } from "./types.js";
+import type { SandboxBackend, SandboxNetwork } from "./types.js";
+import { runUiServer } from "./ui.js";
 import { version } from "./version.js";
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
@@ -40,6 +67,36 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (command === "version" || command === "--version" || command === "-v") {
     console.log(version);
     return 0;
+  }
+  await ensurePrivateStateRoot();
+  if (command === "worker") {
+    if (args.length > 0) {
+      console.error(`error: Unexpected argument: ${args[0]}`);
+      return 1;
+    }
+    return await runRemoteWorker();
+  }
+  if (command === "receive") {
+    if (args.length > 0) {
+      console.error(`error: Unexpected argument: ${args[0]}`);
+      return 1;
+    }
+    return await runRemoteReceiver();
+  }
+  if (command === "session" || command === "build" || command === "cache") {
+    const encoded = args.shift();
+    if (encoded === undefined || args.length > 0) {
+      console.error(`error: ${command} requires one encoded internal request.`);
+      return 1;
+    }
+    try {
+      if (command === "session") return await runRemoteSession(encoded);
+      if (command === "build") return await runRemoteBuildWorker(encoded);
+      return await runRemoteCacheWorker(encoded);
+    } catch (error) {
+      console.error(`error: ${errorText(error)}`);
+      return 1;
+    }
   }
 
   try {
@@ -108,7 +165,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         if (result.inspection.blockers.length > 0) {
           console.log("\nFix the blockers above before creating a snapshot.");
         } else {
-          console.log(`\nNext: branchlift snapshot ${result.config.snapshot.default}`);
+          console.log(`\nNext: review branchlift.yaml, run branchlift security trust, then branchlift snapshot ${result.config.snapshot.default}`);
         }
         return 0;
       }
@@ -120,6 +177,493 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         if (json) console.log(JSON.stringify(inspection, null, 2));
         else printInspection(inspection);
         return inspection.blockers.length === 0 ? 0 : 2;
+      }
+      case "security": {
+        const action = args.shift() ?? "inspect";
+        if (action !== "inspect" && action !== "trust" && action !== "revoke") {
+          throw new BranchLiftError("Usage: branchlift security [inspect|trust|revoke] [--json]");
+        }
+        const json = takeFlag(args, "--json");
+        assertNoArgs(args);
+        const config = await loadConfig(repo);
+        if (action === "trust") {
+          const policy = await trustSecurityPolicy(repo, config);
+          if (json) console.log(JSON.stringify(policy, null, 2));
+          else console.log(`Trusted BranchLift security policy ${policy.digest} on this machine.`);
+          return 0;
+        }
+        if (action === "revoke") {
+          await revokeSecurityPolicy(repo);
+          if (json) console.log(JSON.stringify({ revoked: true }, null, 2));
+          else console.log("Revoked this repository's local BranchLift security-policy approval.");
+          return 0;
+        }
+        const posture = sandboxPosture(config);
+        const secrets = await inspectSecrets(repo, config);
+        const result = {
+          policy: await inspectPolicyTrust(repo, config),
+          sandbox: posture,
+          hostAgentCommands: effectiveSecurity(config).allowHostAgentCommands,
+          secretCommandSources: effectiveSecurity(config).allowSecretCommands,
+          secrets,
+        };
+        if (json) console.log(JSON.stringify(result, null, 2));
+        else printSecurity(result);
+        return result.policy.trusted && posture.boundary === "container" && secrets.every((secret) => !secret.required || secret.available) ? 0 : 2;
+      }
+      case "ui": {
+        const portValue = takeOption(args, "--port");
+        const noOpen = takeFlag(args, "--no-open");
+        assertNoArgs(args);
+        const port = portValue === undefined ? undefined : Number.parseInt(portValue, 10);
+        if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) {
+          throw new BranchLiftError("--port must be an integer between 0 and 65535.");
+        }
+        const config = await loadConfig(repo);
+        await runUiServer(repo, config, { ...(port === undefined ? {} : { port }), open: !noOpen });
+        return 0;
+      }
+      case "remote": {
+        const action = args.shift() ?? "list";
+        const json = takeFlag(args, "--json");
+        if (action === "add") {
+          const repoPath = takeOption(args, "--repo");
+          const user = takeOption(args, "--user");
+          const portValue = takeOption(args, "--port");
+          const identityFile = takeOption(args, "--identity");
+          const binary = takeOption(args, "--binary");
+          const name = requirePositional(args, "remote name");
+          const host = requirePositional(args, "SSH host");
+          assertNoArgs(args);
+          if (repoPath === undefined) throw new BranchLiftError("remote add requires --repo with the absolute path on the remote host.");
+          const port = portValue === undefined ? undefined : Number.parseInt(portValue, 10);
+          if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+            throw new BranchLiftError("--port must be an integer between 1 and 65535.");
+          }
+          const remote = await addRemote({
+            name,
+            host,
+            repoPath,
+            ...(user === undefined ? {} : { user }),
+            ...(port === undefined ? {} : { port }),
+            ...(identityFile === undefined ? {} : { identityFile }),
+            ...(binary === undefined ? {} : { binary }),
+          });
+          if (json) console.log(JSON.stringify(remote, null, 2));
+          else console.log(`Added SSH remote ${remote.name}: ${remote.user === undefined ? "" : `${remote.user}@`}${remote.host}:${remote.repoPath}`);
+          return 0;
+        }
+        if (action === "list") {
+          assertNoArgs(args);
+          const remotes = await listRemotes();
+          if (json) console.log(JSON.stringify(remotes, null, 2));
+          else printRemotes(remotes);
+          return 0;
+        }
+        if (action === "remove") {
+          const name = requirePositional(args, "remote name");
+          assertNoArgs(args);
+          await removeRemote(name);
+          console.log(`Removed local remote configuration ${name}; no remote data was changed.`);
+          return 0;
+        }
+        if (action === "setup") {
+          const name = requirePositional(args, "remote name");
+          assertNoArgs(args);
+          const remote = await setupRemote(repo, name);
+          if (json) console.log(JSON.stringify(remote, null, 2));
+          else console.log(`Installed and verified BranchLift ${version} worker on ${remote.name}.`);
+          return 0;
+        }
+        if (action === "sync") {
+          const snapshotOption = takeOption(args, "--snapshot");
+          const name = requirePositional(args, "remote name");
+          assertNoArgs(args);
+          const config = await loadConfig(repo);
+          const snapshot = snapshotOption ?? config.snapshot.default;
+          await ensureRemoteReady(repo, name);
+          const synced = await syncRemoteCode(repo, name);
+          const state = await pushRemoteSnapshot(repo, name, snapshot);
+          const result = { remote: name, code: synced, state };
+          if (json) console.log(JSON.stringify(result, null, 2));
+          else {
+            console.log(`Synchronized commit ${synced.commit.slice(0, 12)} and snapshot ${snapshot} to ${name}.`);
+            console.log(`Code bundle: ${humanBytes(synced.bundleBytes)}; state transferred: ${humanBytes(state.transferredBytes)}; state blobs reused: ${state.reusedBlobs}.`);
+            if (synced.dirtyPathsExcluded > 0) console.log(`Safety: excluded ${synced.dirtyPathsExcluded} uncommitted/untracked path(s).`);
+          }
+          return 0;
+        }
+        if (action === "snapshot") {
+          const operation = args.shift();
+          if (operation !== "push") throw new BranchLiftError("Usage: branchlift remote snapshot push REMOTE SNAPSHOT [--json]");
+          const name = requirePositional(args, "remote name");
+          const snapshot = requirePositional(args, "snapshot name");
+          assertNoArgs(args);
+          await ensureRemoteReady(repo, name);
+          const pushed = await pushRemoteSnapshot(repo, name, snapshot);
+          if (json) console.log(JSON.stringify(pushed, null, 2));
+          else if (pushed.alreadyPresent) console.log(`Snapshot ${snapshot} is already present on ${name} (${pushed.digest}).`);
+          else console.log(`Pushed snapshot ${snapshot} to ${name}: ${humanBytes(pushed.transferredBytes)} transferred, ${pushed.reusedBlobs} blob(s) reused.`);
+          return 0;
+        }
+        if (action === "launch") {
+          const snapshotOption = takeOption(args, "--snapshot");
+          const noStart = takeFlag(args, "--no-start");
+          const trustPolicy = takeFlag(args, "--trust-policy");
+          const name = requirePositional(args, "remote name");
+          const branch = requirePositional(args, "branch");
+          assertNoArgs(args);
+          const config = await loadConfig(repo);
+          const snapshot = snapshotOption ?? config.snapshot.default;
+          await ensureRemoteReady(repo, name);
+          const code = await syncRemoteCode(repo, name);
+          const state = await pushRemoteSnapshot(repo, name, snapshot);
+          const expectedPolicyDigest = securityPolicyDigest(config);
+          if (trustPolicy) await callRemote(repo, name, {
+            action: "trust",
+            expectedCommit: code.commit,
+            expectedPolicyDigest,
+          });
+          const instance = await callRemote(repo, name, {
+            action: "spawn",
+            branch,
+            snapshot,
+            start: !noStart,
+            startPoint: code.commit,
+            expectedCommit: code.commit,
+            expectedPolicyDigest,
+          });
+          const result = { remote: name, code, state, policyTrusted: trustPolicy, instance };
+          if (json) console.log(JSON.stringify(result, null, 2));
+          else {
+            console.log(`Launched ${branch} on ${name} at ${code.commit.slice(0, 12)} from snapshot ${snapshot}.`);
+            console.log(`Transferred code ${humanBytes(code.bundleBytes)} and state ${humanBytes(state.transferredBytes)}; reused ${state.reusedBlobs} state blob(s).`);
+          }
+          return 0;
+        }
+        if (action === "live-sync" || action === "watch") {
+          const once = action === "live-sync" || takeFlag(args, "--once");
+          const intervalValue = takeOption(args, "--interval");
+          const name = requirePositional(args, "remote name");
+          const branch = requirePositional(args, "branch");
+          assertNoArgs(args);
+          await ensureRemoteReady(repo, name);
+          if (once) {
+            const result = await syncRemoteWorkingTree(repo, name, branch);
+            if (json) console.log(JSON.stringify(result, null, 2));
+            else console.log(`Live-synced ${result.files} file(s) to ${name}:${branch}; ${humanBytes(result.transferredBytes)} transferred, ${result.deletedFiles} deleted.`);
+            return 0;
+          }
+          if (json) throw new BranchLiftError("Continuous remote watch does not support --json.");
+          const intervalMs = intervalValue === undefined ? 2_000 : Number.parseInt(intervalValue, 10);
+          if (!Number.isInteger(intervalMs)) throw new BranchLiftError("--interval must be an integer number of milliseconds.");
+          const controller = new AbortController();
+          const stop = (): void => controller.abort();
+          process.once("SIGINT", stop);
+          process.once("SIGTERM", stop);
+          console.log(`Watching ${repo.root} and mirroring safe working-tree changes to ${name}:${branch}. Press Ctrl-C to stop.`);
+          try {
+            await watchRemoteWorkingTree(repo, name, branch, {
+              intervalMs,
+              signal: controller.signal,
+              onSync: (result) => console.log(`[${new Date().toLocaleTimeString()}] ${result.alreadyCurrent ? "verified" : "synced"} ${result.files} file(s); ${humanBytes(result.transferredBytes)} transferred.`),
+            });
+          } finally {
+            process.off("SIGINT", stop);
+            process.off("SIGTERM", stop);
+          }
+          return 0;
+        }
+        if (action === "tunnel") {
+          const operation = args.shift() ?? "start";
+          const name = requirePositional(args, "remote name");
+          const branch = requirePositional(args, "branch");
+          assertNoArgs(args);
+          if (operation === "start") {
+            await ensureRemoteReady(repo, name);
+            const state = await startRemoteTunnels(repo, name, branch);
+            if (json) console.log(JSON.stringify(state, null, 2));
+            else printTunnelState(state);
+          } else if (operation === "status") {
+            const state = await inspectRemoteTunnel(repo, name, branch);
+            if (json) console.log(JSON.stringify(state ?? null, null, 2));
+            else if (state === undefined) console.log(`No active tunnel for ${name}:${branch}.`);
+            else printTunnelState(state);
+          } else if (operation === "stop") {
+            const stopped = await stopRemoteTunnels(repo, name, branch);
+            if (json) console.log(JSON.stringify({ stopped }, null, 2));
+            else console.log(stopped ? `Stopped tunnels for ${name}:${branch}.` : `No tunnel was active for ${name}:${branch}.`);
+          } else if (operation === "watch") {
+            if (json) throw new BranchLiftError("Continuous tunnel monitoring does not support --json.");
+            await ensureRemoteReady(repo, name);
+            printTunnelState(await startRemoteTunnels(repo, name, branch));
+            const controller = new AbortController();
+            const stop = (): void => controller.abort();
+            process.once("SIGINT", stop);
+            process.once("SIGTERM", stop);
+            console.log("Tunnel recovery monitor active. Press Ctrl-C to stop monitoring; the SSH tunnels remain active.");
+            try {
+              await monitorRemoteTunnels(repo, name, branch, {
+                signal: controller.signal,
+                onRestart: (state) => {
+                  console.log(`[${new Date().toLocaleTimeString()}] SSH tunnels recovered.`);
+                  printTunnelState(state);
+                },
+              });
+            } finally {
+              process.off("SIGINT", stop);
+              process.off("SIGTERM", stop);
+            }
+          } else throw new BranchLiftError("Usage: branchlift remote tunnel start|status|stop|watch REMOTE BRANCH");
+          return 0;
+        }
+        if (action === "agent" || action === "shell") {
+          const separator = args.indexOf("--");
+          const childCommand = separator >= 0 ? args.splice(separator + 1) : [];
+          if (separator >= 0) args.splice(separator, 1);
+          const network = optionalSandboxNetwork(takeOption(args, "--network"));
+          const image = takeOption(args, "--image");
+          const readOnlyWorktree = takeFlag(args, "--read-only-worktree");
+          const name = requirePositional(args, "remote name");
+          const branch = requirePositional(args, "branch");
+          assertNoArgs(args);
+          if (json) throw new BranchLiftError("Interactive remote agent sessions do not support --json.");
+          const agentCommand = action === "shell" ? ["/bin/sh"] : childCommand;
+          if (agentCommand.length === 0) throw new BranchLiftError("remote agent requires -- before the agent command.");
+          await ensureRemoteReady(repo, name);
+          return await runRemoteAgent(repo, name, branch, agentCommand, {
+            ...(network === undefined ? {} : { network }),
+            ...(image === undefined ? {} : { image }),
+            writableWorktree: !readOnlyWorktree,
+          });
+        }
+        if (action === "build") {
+          const branch = takeOption(args, "--branch");
+          const context = takeOption(args, "--context");
+          const dockerfile = takeOption(args, "--file");
+          const tag = takeOption(args, "--tag");
+          const networkValue = takeOption(args, "--network") ?? "default";
+          const cacheMax = takeOption(args, "--cache-max");
+          const noCache = takeFlag(args, "--no-cache");
+          const name = requirePositional(args, "remote name");
+          assertNoArgs(args);
+          if (json) throw new BranchLiftError("Streaming remote builds do not support --json.");
+          if (tag === undefined) throw new BranchLiftError("remote build requires --tag IMAGE.");
+          if (networkValue !== "default" && networkValue !== "none") throw new BranchLiftError("remote build --network must be default or none.");
+          await ensureRemoteReady(repo, name);
+          return await runRemoteBuild(repo, name, {
+            ...(branch === undefined ? {} : { branch }),
+            ...(context === undefined ? {} : { context }),
+            ...(dockerfile === undefined ? {} : { dockerfile }),
+            tag,
+            network: networkValue,
+            noCache,
+            ...(cacheMax === undefined ? {} : { cacheMax }),
+          });
+        }
+        if (action === "cache") {
+          const operation = args.shift();
+          const confirm = takeOption(args, "--confirm");
+          const name = requirePositional(args, "remote name");
+          assertNoArgs(args);
+          if (json) throw new BranchLiftError("Streaming remote cache commands do not support --json.");
+          if (operation !== "inspect" && operation !== "prune") throw new BranchLiftError("Usage: branchlift remote cache inspect|prune REMOTE [--confirm prune]");
+          if (operation === "prune" && confirm !== "prune") throw new BranchLiftError("remote cache prune requires --confirm prune.");
+          await ensureRemoteReady(repo, name);
+          return await runRemoteCache(repo, name, operation, operation === "prune" ? "prune" : undefined);
+        }
+        if (action === "dev") {
+          const snapshotOption = takeOption(args, "--snapshot");
+          const trustPolicy = takeFlag(args, "--trust-policy");
+          const noTunnel = takeFlag(args, "--no-tunnel");
+          const intervalValue = takeOption(args, "--interval");
+          const name = requirePositional(args, "remote name");
+          const branch = requirePositional(args, "branch");
+          assertNoArgs(args);
+          if (json) throw new BranchLiftError("Long-running remote dev mode does not support --json.");
+          const intervalMs = intervalValue === undefined ? 2_000 : Number.parseInt(intervalValue, 10);
+          if (!Number.isInteger(intervalMs) || intervalMs < 250 || intervalMs > 60_000) {
+            throw new BranchLiftError("--interval must be between 250 and 60000 milliseconds.");
+          }
+          const config = await loadConfig(repo);
+          const snapshot = snapshotOption ?? config.snapshot.default;
+          await ensureRemoteReady(repo, name);
+          const code = await syncRemoteCode(repo, name);
+          const state = await pushRemoteSnapshot(repo, name, snapshot);
+          const expectedPolicyDigest = securityPolicyDigest(config);
+          if (trustPolicy) await callRemote(repo, name, { action: "trust", expectedCommit: code.commit, expectedPolicyDigest });
+          const inventory = await callRemote(repo, name, { action: "list" });
+          if (!Array.isArray(inventory)) throw new BranchLiftError(`Remote ${name} returned an invalid instance list.`);
+          const existing = inventory.find((item) => typeof item === "object" && item !== null && "branch" in item && item.branch === branch);
+          if (existing !== undefined && (!("snapshot" in existing) || existing.snapshot !== snapshot)) {
+            throw new BranchLiftError(`Remote branch ${branch} already uses a different snapshot.`, "Choose another branch or explicitly destroy the existing remote instance.");
+          }
+          if (existing !== undefined && (!("status" in existing) || (existing.status !== "running" && existing.status !== "stopped"))) {
+            throw new BranchLiftError(`Remote branch ${branch} is not reusable because its state is not running or stopped.`, "Inspect and explicitly repair or destroy the remote instance.");
+          }
+          let instance: unknown;
+          let initialLiveSync: Awaited<ReturnType<typeof syncRemoteWorkingTree>>;
+          if (existing === undefined) {
+            instance = await callRemote(repo, name, {
+              action: "spawn",
+              branch,
+              snapshot,
+              start: true,
+              startPoint: code.commit,
+              expectedCommit: code.commit,
+              expectedPolicyDigest,
+            });
+            initialLiveSync = await syncRemoteWorkingTree(repo, name, branch);
+          } else {
+            initialLiveSync = await syncRemoteWorkingTree(repo, name, branch);
+            instance = existing.status === "running"
+              ? existing
+              : await callRemote(repo, name, { action: "start", branch, expectedCommit: code.commit, expectedPolicyDigest });
+          }
+          console.log(`Remote dev environment ready on ${name}:${branch}; state ${state.digest.slice(0, 19)}…`);
+          console.log(`Working tree verified (${initialLiveSync.files} safe tracked/untracked file(s), ${humanBytes(initialLiveSync.transferredBytes)} transferred).`);
+          let tunnelMonitor: Promise<void> | undefined;
+          if (!noTunnel) printTunnelState(await startRemoteTunnels(repo, name, branch));
+          const controller = new AbortController();
+          const stop = (): void => controller.abort();
+          process.once("SIGINT", stop);
+          process.once("SIGTERM", stop);
+          if (!noTunnel) tunnelMonitor = monitorRemoteTunnels(repo, name, branch, {
+            signal: controller.signal,
+            onRestart: (state) => {
+              console.log(`[${new Date().toLocaleTimeString()}] SSH tunnels recovered.`);
+              printTunnelState(state);
+            },
+          });
+          console.log(`Live sync active for ${typeof instance === "object" && instance !== null && "branch" in instance ? String(instance.branch) : branch}. Press Ctrl-C to stop watching; remote backend and tunnels remain active.`);
+          try {
+            const fileWatch = watchRemoteWorkingTree(repo, name, branch, {
+              intervalMs,
+              signal: controller.signal,
+              onSync: (result) => console.log(`[${new Date().toLocaleTimeString()}] ${result.alreadyCurrent ? "verified" : "synced"}; ${humanBytes(result.transferredBytes)} transferred.`),
+            });
+            await Promise.all(tunnelMonitor === undefined ? [fileWatch] : [fileWatch, tunnelMonitor]);
+          } finally {
+            controller.abort();
+            process.off("SIGINT", stop);
+            process.off("SIGTERM", stop);
+          }
+          return 0;
+        }
+        const remoteName = requirePositional(args, "remote name");
+        let result: unknown;
+        if (action === "doctor" || action === "ping") {
+          assertNoArgs(args);
+          result = await callRemote(repo, remoteName, { action: "ping" });
+        } else if (action === "instances") {
+          assertNoArgs(args);
+          result = await callRemote(repo, remoteName, { action: "list" });
+        } else if (action === "preview") {
+          const branch = args.shift();
+          assertNoArgs(args);
+          result = await callRemote(repo, remoteName, { action: "preview", ...(branch === undefined ? {} : { branch }) });
+        } else if (action === "snapshots") {
+          assertNoArgs(args);
+          result = await callRemote(repo, remoteName, { action: "snapshots" });
+        } else if (action === "trust") {
+          assertNoArgs(args);
+          result = await callRemote(repo, remoteName, { action: "trust" });
+        } else if (action === "spawn") {
+          const snapshot = takeOption(args, "--snapshot");
+          const noStart = takeFlag(args, "--no-start");
+          const branch = requirePositional(args, "branch");
+          assertNoArgs(args);
+          result = await callRemote(repo, remoteName, {
+            action: "spawn",
+            branch,
+            start: !noStart,
+            ...(snapshot === undefined ? {} : { snapshot }),
+          });
+        } else if (action === "start" || action === "stop") {
+          const branch = requirePositional(args, "branch");
+          assertNoArgs(args);
+          result = await callRemote(repo, remoteName, { action, branch });
+        } else if (action === "reset") {
+          const noStart = takeFlag(args, "--no-start");
+          const branch = requirePositional(args, "branch");
+          assertNoArgs(args);
+          result = await callRemote(repo, remoteName, { action: "reset", branch, confirm: branch, start: !noStart });
+        } else if (action === "destroy") {
+          const branch = requirePositional(args, "branch");
+          assertNoArgs(args);
+          result = await callRemote(repo, remoteName, { action: "destroy", branch, confirm: branch });
+        } else {
+          throw new BranchLiftError(`Unknown remote action: ${action}`, "Run branchlift help for the remote command list.");
+        }
+        console.log(JSON.stringify(result, null, 2));
+        return 0;
+      }
+      case "secrets": {
+        const action = args.shift() ?? "list";
+        if (action !== "list" && action !== "doctor") {
+          throw new BranchLiftError("Usage: branchlift secrets [list|doctor] [--json]");
+        }
+        const json = takeFlag(args, "--json");
+        assertNoArgs(args);
+        const statuses = await inspectSecrets(repo, await loadConfig(repo));
+        if (json) console.log(JSON.stringify(statuses, null, 2));
+        else printSecretStatuses(statuses);
+        return action === "doctor" && statuses.some((secret) => secret.required && !secret.available) ? 2 : 0;
+      }
+      case "events": {
+        const json = takeFlag(args, "--json");
+        const limitValue = takeOption(args, "--limit");
+        assertNoArgs(args);
+        const limit = limitValue === undefined ? 100 : Number.parseInt(limitValue, 10);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 2000) {
+          throw new BranchLiftError("--limit must be an integer between 1 and 2000.");
+        }
+        const events = await listEvents(repo, limit);
+        if (json) console.log(JSON.stringify(events, null, 2));
+        else {
+          if (events.length === 0) console.log("No BranchLift audit events for this repository.");
+          for (const event of events) {
+            console.log(`${event.timestamp}\t${event.level}\t${event.kind}\t${event.message}`);
+          }
+        }
+        return 0;
+      }
+      case "sandbox": {
+        const action = args.shift() ?? "inspect";
+        let childCommand: string[] = [];
+        if (action === "run") {
+          const separator = args.indexOf("--");
+          if (separator < 0) throw new BranchLiftError("branchlift sandbox run requires -- before the command.");
+          childCommand = args.splice(separator + 1);
+          args.splice(separator, 1);
+        }
+        const image = takeOption(args, "--image");
+        const backendValue = takeOption(args, "--backend");
+        const networkValue = takeOption(args, "--network");
+        const readOnlyWorktree = takeFlag(args, "--read-only-worktree");
+        const json = takeFlag(args, "--json");
+        const backend = optionalSandboxBackend(backendValue);
+        const network = optionalSandboxNetwork(networkValue);
+        const config = await loadConfig(repo);
+        const options = {
+          ...(image === undefined ? {} : { image }),
+          ...(backend === undefined ? {} : { backend }),
+          ...(network === undefined ? {} : { network }),
+          writableWorktree: !readOnlyWorktree,
+        };
+        if (action === "inspect") {
+          assertNoArgs(args);
+          const posture = sandboxPosture(config, options);
+          if (json) console.log(JSON.stringify(posture, null, 2));
+          else printSandboxPosture(posture);
+          return posture.boundary === "container" ? 0 : 2;
+        }
+        if (action !== "run") throw new BranchLiftError("Usage: branchlift sandbox run BRANCH [OPTIONS] -- COMMAND ...");
+        const branch = requirePositional(args, "branch");
+        assertNoArgs(args);
+        if (childCommand.length === 0) throw new BranchLiftError("Missing command after --.");
+        if (json) throw new BranchLiftError("--json is available for sandbox inspect, not interactive sandbox run.");
+        return await runSandbox(repo, config, branch, childCommand, options);
       }
       case "snapshot": {
         const action = args[0];
@@ -138,6 +682,58 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           assertNoArgs(args);
           await deleteSnapshot(repo, name);
           console.log(`Deleted immutable snapshot ${name}.`);
+          return 0;
+        }
+        if (action === "manifest") {
+          args.shift();
+          const json = takeFlag(args, "--json");
+          const name = requirePositional(args, "snapshot name");
+          assertNoArgs(args);
+          const manifest = await ensureSnapshotManifest(repo, name);
+          if (json) console.log(JSON.stringify(manifest, null, 2));
+          else {
+            console.log(`Snapshot: ${manifest.snapshot}`);
+            console.log(`Content: ${manifest.digest}`);
+            console.log(`Logical bytes: ${humanBytes(manifest.logicalBytes)}`);
+            console.log(`Manifest entries: ${manifest.entries.length}`);
+          }
+          return 0;
+        }
+        if (action === "diff") {
+          args.shift();
+          const json = takeFlag(args, "--json");
+          const left = requirePositional(args, "left snapshot");
+          const right = requirePositional(args, "right snapshot");
+          assertNoArgs(args);
+          const diff = await diffSnapshots(repo, left, right);
+          if (json) console.log(JSON.stringify(diff, null, 2));
+          else {
+            console.log(`${left} -> ${right}`);
+            console.log(`Added: ${diff.added}; removed: ${diff.removed}; modified: ${diff.modified}; unchanged: ${diff.unchanged}`);
+            console.log(`Shared content: ${humanBytes(diff.sharedContentBytes)}`);
+            for (const entry of diff.entries.slice(0, 200)) console.log(`${entry.kind}\t${entry.volume}:${entry.path}`);
+            if (diff.entries.length > 200) console.log(`... ${diff.entries.length - 200} more change(s); use --json for the complete diff.`);
+          }
+          return 0;
+        }
+        if (action === "commit") {
+          args.shift();
+          const json = takeFlag(args, "--json");
+          const sourceBranch = takeOption(args, "--from");
+          const name = requirePositional(args, "snapshot name");
+          assertNoArgs(args);
+          if (sourceBranch === undefined) throw new BranchLiftError("snapshot commit requires --from BRANCH.");
+          const config = await loadConfig(repo);
+          const inspection = await inspectConfiguredCompose(repo, config);
+          if (!json) console.log(`Committing crash-consistent state from ${sourceBranch} as immutable snapshot ${name}...`);
+          const result = await commitSnapshotFromInstance(repo, config, inspection, name, sourceBranch);
+          if (json) console.log(JSON.stringify(result.metadata, null, 2));
+          else {
+            console.log(`Snapshot ${name} committed from ${sourceBranch}.`);
+            console.log(`Parent: ${result.metadata.parentSnapshot}`);
+            console.log(`Content: ${result.metadata.contentDigest}`);
+            console.log(`Logical size: ${humanBytes(result.metadata.sizeBytes ?? 0)}`);
+          }
           return 0;
         }
         if (action === "import") {
@@ -502,6 +1098,74 @@ function printError(error: unknown): void {
   console.error(`error: ${String(error)}`);
 }
 
+function printSandboxPosture(posture: ReturnType<typeof sandboxPosture>): void {
+  console.log(`Boundary: ${posture.boundary}`);
+  console.log(`Backend: ${posture.backend}`);
+  console.log(`Image: ${posture.image}`);
+  console.log(`Network: ${posture.network}`);
+  console.log(`Root filesystem: ${posture.readOnlyRoot ? "read-only" : "writable"}`);
+  console.log(`Linux capabilities: ${posture.capabilities}`);
+  console.log(`Host Docker socket: ${posture.hostDockerSocketMounted ? "mounted" : "not mounted"}`);
+  console.log(`Limits: ${posture.resourceLimits.memory}, ${posture.resourceLimits.cpus} CPU, ${posture.resourceLimits.pids} PIDs`);
+  for (const warning of posture.warnings) console.log(`warning: ${warning}`);
+}
+
+function printSecretStatuses(statuses: Awaited<ReturnType<typeof inspectSecrets>>): void {
+  if (statuses.length === 0) {
+    console.log("No secret definitions are configured.");
+    return;
+  }
+  console.log("STATUS\tNAME\tSOURCE\tTARGET\tSCOPES");
+  for (const secret of statuses) {
+    console.log(`${secret.available ? "available" : secret.required ? "missing" : "optional"}\t${secret.name}\t${secret.source}\t${secret.target}\t${secret.scopes.join(",")}`);
+    console.log(`  ${secret.message}`);
+  }
+}
+
+function printSecurity(result: {
+  policy: Awaited<ReturnType<typeof inspectPolicyTrust>>;
+  sandbox: ReturnType<typeof sandboxPosture>;
+  hostAgentCommands: boolean;
+  secretCommandSources: boolean;
+  secrets: Awaited<ReturnType<typeof inspectSecrets>>;
+}): void {
+  console.log(`Policy approval: ${result.policy.trusted ? result.policy.implicitDefault ? "implicit secure default" : "trusted" : "required"}`);
+  console.log(`Policy digest: ${result.policy.digest}`);
+  printSandboxPosture(result.sandbox);
+  console.log(`Host agent commands: ${result.hostAgentCommands ? "allowed" : "blocked"}`);
+  console.log(`Secret command sources: ${result.secretCommandSources ? "allowed" : "blocked"}`);
+  printSecretStatuses(result.secrets);
+}
+
+function printRemotes(remotes: Awaited<ReturnType<typeof listRemotes>>): void {
+  if (remotes.length === 0) {
+    console.log("No SSH remotes configured.");
+    return;
+  }
+  console.log("NAME\tSSH\tREPOSITORY\tBINARY");
+  for (const remote of remotes) {
+    const destination = `${remote.user === undefined ? "" : `${remote.user}@`}${remote.host}:${remote.port}`;
+    console.log(`${remote.name}\t${destination}\t${remote.repoPath}\t${remote.binary}`);
+  }
+}
+
+function printTunnelState(state: Awaited<ReturnType<typeof startRemoteTunnels>>): void {
+  console.log(`SSH tunnels active for ${state.remote}:${state.branch}`);
+  for (const mapping of state.mappings) {
+    console.log(`  ${mapping.service}:${mapping.target} -> ${mapping.localHost}:${mapping.localPort}`);
+  }
+}
+
+async function ensureRemoteReady(repo: RepoInfo, name: string): Promise<void> {
+  try {
+    const result = await callRemote(repo, name, { action: "ping" });
+    if (typeof result === "object" && result !== null && "version" in result && result.version === version) return;
+  } catch {
+    // Setup below installs the current worker and returns a more specific SSH/install error if it fails.
+  }
+  await setupRemote(repo, name);
+}
+
 function errorText(error: unknown): string {
   if (error instanceof BranchLiftError) return [error.message, error.hint].filter(Boolean).join(" ");
   return error instanceof Error ? error.message : String(error);
@@ -536,6 +1200,20 @@ function takeOptions(args: string[], name: string): string[] {
   return values;
 }
 
+function optionalSandboxBackend(value: string | undefined): SandboxBackend | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "docker" && value !== "host") throw new BranchLiftError("--backend must be docker or host.");
+  return value;
+}
+
+function optionalSandboxNetwork(value: string | undefined): SandboxNetwork | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "none" && value !== "backend" && value !== "outbound") {
+    throw new BranchLiftError("--network must be none, backend, or outbound.");
+  }
+  return value;
+}
+
 function assertNoArgs(args: string[]): void {
   if (args.length > 0) throw new BranchLiftError(`Unexpected argument: ${args[0]}`);
 }
@@ -546,10 +1224,45 @@ function printHelp(): void {
 Usage:
   branchlift init [--compose FILE]... [--dry-run] [--json]
   branchlift inspect [--json]
+  branchlift security inspect [--json]
+  branchlift security trust|revoke [--json]
+  branchlift ui [--port PORT] [--no-open]
+  branchlift remote add NAME HOST --repo REMOTE_PATH [--user USER] [--port PORT] [--identity FILE] [--binary PATH]
+  branchlift remote sync NAME [--snapshot NAME]
+  branchlift remote snapshot push NAME SNAPSHOT
+  branchlift remote launch NAME BRANCH [--snapshot NAME] [--no-start] [--trust-policy]
+  branchlift remote dev NAME BRANCH [--snapshot NAME] [--trust-policy] [--no-tunnel] [--interval MS]
+  branchlift remote live-sync NAME BRANCH
+  branchlift remote watch NAME BRANCH [--interval MS] [--once]
+  branchlift remote tunnel start|status|stop|watch NAME BRANCH
+  branchlift remote shell NAME BRANCH [--network none|backend|outbound] [--image IMAGE] [--read-only-worktree]
+  branchlift remote agent NAME BRANCH [--network none|backend|outbound] [--image IMAGE] [--read-only-worktree] -- COMMAND ...
+  branchlift remote build NAME --tag IMAGE [--branch BRANCH] [--context PATH] [--file DOCKERFILE] [--network default|none] [--no-cache] [--cache-max 20gb]
+  branchlift remote cache inspect NAME
+  branchlift remote cache prune NAME --confirm prune
+  branchlift remote trust NAME
+  branchlift remote list [--json]
+  branchlift remote remove NAME
+  branchlift remote setup NAME
+  branchlift remote doctor NAME
+  branchlift remote instances NAME
+  branchlift remote preview NAME [BRANCH]
+  branchlift remote snapshots NAME
+  branchlift remote spawn NAME BRANCH [--snapshot SNAPSHOT] [--no-start]
+  branchlift remote start|stop NAME BRANCH
+  branchlift remote reset NAME BRANCH [--no-start]
+  branchlift remote destroy NAME BRANCH
+  branchlift secrets [list|doctor] [--json]
+  branchlift events [--limit N] [--json]
+  branchlift sandbox inspect [--backend docker|host] [--network none|backend|outbound] [--image IMAGE] [--json]
+  branchlift sandbox run BRANCH [--network none|backend|outbound] [--image IMAGE] [--read-only-worktree] -- COMMAND ...
   branchlift snapshot [create] [NAME]
   branchlift snapshot import [NAME] [--project COMPOSE_PROJECT] [--json]
   branchlift snapshot list [--json]
   branchlift snapshot delete NAME
+  branchlift snapshot manifest NAME [--json]
+  branchlift snapshot diff LEFT RIGHT [--json]
+  branchlift snapshot commit NAME --from BRANCH [--json]
   branchlift spawn BRANCH [--snapshot NAME] [--no-start] [-- AGENT ...]
   branchlift attach [--snapshot NAME] [--no-start] [-- AGENT ...]
   branchlift start BRANCH [-- AGENT ...]

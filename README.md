@@ -2,7 +2,12 @@
 
 **Lift a full backend into every worktree.**
 
-BranchLift gives parallel coding agents isolated, stateful backend environments. Git worktrees separate source files; BranchLift also separates PostgreSQL, Redis, queues, object stores, Docker networks, and published ports.
+[![CI](https://github.com/MuratKomurcu1/BranchLift/actions/workflows/ci.yml/badge.svg)](https://github.com/MuratKomurcu1/BranchLift/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/branchlift)](https://www.npmjs.com/package/branchlift)
+[![Homebrew](https://img.shields.io/badge/Homebrew-tap-orange)](https://github.com/MuratKomurcu1/homebrew-tap)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
+BranchLift gives parallel coding agents isolated, stateful backend environments. Git worktrees separate source files; BranchLift also separates PostgreSQL, Redis, queues, object stores, Docker networks, and published ports. Its control plane adds immutable state lineage, a least-privilege agent sandbox, scoped secret injection, SSH workers, a local UI, audit events, and MCP tools.
 
 ```text
 main snapshot
@@ -11,7 +16,23 @@ main snapshot
 └── agent/migration     → isolated worktree + PostgreSQL + Redis + ports
 ```
 
-It is local-first, agent-agnostic, and has no hosted service or API key.
+It is local-first, agent-agnostic, self-hosted, and has no BranchLift account, hosted service, or paid dependency.
+
+## Where BranchLift fits
+
+The 2026 parallel-agent ecosystem is full of excellent **session orchestrators** — Conductor, Vibe Kanban, Claude Squad, Nimbalyst — that launch agents on worktrees and visualize diffs. Cloud platforms (Codespaces, DevPod, E2B) isolate whole machines. Almost none of them solve what an agent actually breaks first: the shared database, queue, and cache state behind the code.
+
+BranchLift is that missing layer. It composes with orchestrators rather than replacing them: whatever spawns your worktrees, BranchLift gives each one seeded backend state it can mutate, commit as a child snapshot, diff semantically, and reset — plus a hardened Docker sandbox for untrusted agent commands and your own machines as remote workers over plain SSH.
+
+| Capability | Session orchestrators | Cloud dev VMs | DB branching (cloud) | **BranchLift** |
+|---|---|---|---|---|
+| Worktree isolation | ✅ core | ❌ | ❌ | ✅ |
+| Seeded stateful snapshots per branch | ❌ | partial (whole VM) | ✅ Postgres only, cloud | ✅ any Compose volume, local or SSH |
+| Agent command sandbox (no host socket) | ❌ | ✅ VM-sized | ❌ | ✅ container-sized, policy-gated |
+| Remote worker on your own host via SSH | ❌ | own product only | ❌ | ✅ no vendor service |
+| MCP + audit trail | partial | partial | ❌ | ✅ |
+
+See [docs/COMPARISON.md](docs/COMPARISON.md) for the detailed August 2026 landscape review.
 
 ## The problem
 
@@ -27,7 +48,7 @@ BranchLift prepares one stopped, immutable golden snapshot and clones its state 
 
 ## Current status
 
-**v1.2** covers PostgreSQL 16, MySQL 8.4 LTS, and Redis 7 in one real Docker end-to-end contract. It imports an existing stopped-consistent Compose state, garbage-collects old runtimes safely, and runs public Linux lifecycle evidence against pinned Docmost, n8n, and Langfuse stacks. Langfuse exercises PostgreSQL, ClickHouse, MinIO, Redis, web, and worker services through snapshot, spawn, HTTP readiness, mutation, reset, state restoration, and strict cleanup.
+**The current main branch** covers PostgreSQL 16, MySQL 8.4 LTS, and Redis 7 in one real Docker end-to-end contract. It imports an existing stopped-consistent Compose state, garbage-collects old runtimes safely, and runs public Linux lifecycle evidence against pinned Docmost, n8n, and Langfuse stacks. The next release also introduces the v2 control and data planes described below.
 
 Supported today:
 
@@ -38,7 +59,9 @@ Supported today:
 - MySQL 8.4 LTS on macOS Docker Desktop and Linux;
 - Redis and generic named volumes;
 - APFS clonefile and Linux reflink, with recursive-copy fallback;
-- arbitrary agent commands, including `codex` and `claude`;
+- resource-limited Docker sandbox execution with all Linux capabilities dropped, `no-new-privileges`, a read-only root, no host Docker socket, and `none`, backend-only, or outbound networking;
+- host agent commands only after an explicit project policy opt-in;
+- scoped env and read-only `/run/secrets/...` file injection without writing secrets into a worktree;
 - multiple merged Compose files, with legacy `compose.file` compatibility;
 - immutable snapshot listing and dependency-protected deletion;
 - runtime audits and conservative orphan cleanup through `doctor --fix`;
@@ -47,7 +70,7 @@ Supported today:
 - crash recovery for abandoned snapshot builds and instance creation;
 - attachment to worktrees already created by Codex, Claude, an IDE, or the user;
 - idempotent session-start hooks for Codex, Claude Code, and Cursor;
-- a local MCP server exposing attach, list, preview, and logs;
+- a local MCP server exposing attach, runtime health/logs, security posture, snapshots/diffs, audit events, and sanitized remote inventory;
 - live service/health inspection through `preview` and targeted Compose logs.
 - crash-consistent snapshot import from an existing Compose project;
 - age-filtered, lock-rechecked garbage collection for stopped and failed runtimes;
@@ -55,6 +78,12 @@ Supported today:
 - public Linux lifecycle evidence for Docmost, n8n Hosting, and the six-service Langfuse stack;
 - parallel multi-volume cloning and port discovery;
 - a recorded 512 MiB Btrfs reflink benchmark with raw samples.
+- content-addressed snapshot manifests, parent lineage, crash-consistent instance commits, and semantic snapshot diffs;
+- a loopback-only, token-protected control-plane UI for lifecycle, state, security, audit, and remote operations;
+- strict-host-key SSH workers with an allowlisted protocol and user-scoped, sudo-free worker setup.
+- one-command remote development with conflict-detecting live working-tree sync and automatic loopback SSH port tunnels;
+- sandbox-forced remote agent shells with no host-shell or Docker-socket access;
+- persistent repository-scoped BuildKit builders with remote build and exact-confirmation cache management.
 
 MongoDB, Kafka, Windows, and Podman are not yet claimed as production-ready. Existing Compose state can be imported from managed named volumes, but a database-specific production claim still requires its own crash-consistency E2E contract.
 
@@ -84,6 +113,7 @@ Run this inside an existing Git repository containing `compose.yaml` or `docker-
 branchlift init --dry-run
 branchlift init
 branchlift inspect
+branchlift security trust
 ```
 
 `init` creates `branchlift.yaml`. Commit that file, then build the golden backend once:
@@ -105,21 +135,23 @@ branchlift snapshot import dev --project my-existing-stack
 
 Import records the currently running services, stops only those services for a crash-consistent filesystem copy, and restores them before returning. The resulting snapshot is immutable; BranchLift never clones a running database.
 
-Spawn isolated branches and optionally launch an agent in each one:
+Spawn isolated branches, then run a reviewed command inside the default Docker security boundary:
 
 ```bash
-branchlift spawn agent/fix-auth -- codex
-branchlift spawn agent/billing -- claude
+branchlift spawn agent/fix-auth
+branchlift sandbox run agent/fix-auth --read-only-worktree -- npm test
 branchlift list
 ```
 
 If a tool has already created and checked out a worktree, run this from that worktree instead:
 
 ```bash
-branchlift attach -- codex
+branchlift attach
 ```
 
 Attached worktrees are recorded as externally owned. BranchLift manages their backend state but never removes the worktree itself.
+
+The sandbox image must already exist locally; BranchLift never pulls and executes an unreviewed image implicitly. Build an image containing Codex, Claude Code, or your other tools, set `security.sandbox.image`, then run the agent through `branchlift sandbox run`. Legacy `spawn -- AGENT` host execution remains available only when `security.allowHostAgentCommands` is explicitly enabled.
 
 Install automatic session-start attachment and the project-scoped MCP server without replacing existing agent settings:
 
@@ -219,6 +251,57 @@ compose:
 
 The older `compose.file: compose.yaml` form remains readable.
 
+Project execution policy is committed, while its machine-local approval and secret values are not:
+
+```yaml
+security:
+  sandbox:
+    backend: docker
+    image: my-reviewed-agent:local
+    network: backend
+    readOnlyRoot: true
+    memory: 4g
+    cpus: 2
+    pidsLimit: 512
+  allowHostAgentCommands: false
+  allowSecretCommands: false
+secrets:
+  apiToken:
+    source: { env: MY_API_TOKEN }
+    target: { env: API_TOKEN }
+    scopes: [sandbox]
+    required: true
+  credentials:
+    source: { file: ~/.config/my-app/credentials.json }
+    target: { file: /run/secrets/credentials.json }
+    scopes: [sandbox]
+    required: true
+ui: { host: 127.0.0.1, port: 7788 }
+```
+
+File targets are restricted to `/run/secrets/...` and the sandbox scope. Command secret sources and host agent commands are blocked by default. See [docs/SECURITY-AND-SECRETS.md](docs/SECURITY-AND-SECRETS.md).
+
+After reviewing `branchlift.yaml`, run `branchlift security trust`. BranchLift stores only its digest outside the worktree. Any configuration change invalidates the approval and blocks Compose lifecycle/snapshot operations, sandbox execution, secret resolution, and host-agent execution until the new digest is reviewed and trusted.
+
+Commit a useful mutated instance as a child snapshot and compare it without starting a database:
+
+```bash
+branchlift snapshot commit migrated --from agent/fix-auth
+branchlift snapshot diff dev migrated
+```
+
+Open the local control plane or register a machine you control over SSH:
+
+```bash
+branchlift ui
+branchlift remote add lab 192.0.2.10 --user developer --repo /srv/my-project
+branchlift remote sync lab --snapshot dev
+branchlift remote launch lab agent/fix-auth --snapshot dev
+branchlift remote dev lab agent/fix-auth --snapshot dev
+```
+
+`remote sync` automatically installs/verifies the user-scoped worker, transfers the exact committed Git `HEAD`, and sends only snapshot blobs the remote does not already have. `remote launch` adds an exact-commit worktree and isolated backend. `remote dev` then mirrors tracked plus untracked-nonignored working files, opens loopback SSH forwards for discovered TCP services, and keeps reconciling until stopped. Live sync is one-way and refuses remote edits rather than overwriting them. No cloud account, subscription, public control daemon, or Docker-in-Docker daemon is required. See [docs/REMOTE.md](docs/REMOTE.md).
+
 ## Commands
 
 ```text
@@ -243,6 +326,15 @@ branchlift gc [--older-than 7d] [--dry-run] [--json]
 branchlift benchmark [SNAPSHOT] [--iterations N] [--json]
 branchlift agents install [all|codex|claude|cursor] [--dry-run] [--json]
 branchlift mcp
+branchlift remote dev REMOTE BRANCH [--snapshot NAME] [--trust-policy] [--no-tunnel]
+branchlift remote live-sync REMOTE BRANCH
+branchlift remote watch REMOTE BRANCH [--interval MS]
+branchlift remote tunnel start|status|stop|watch REMOTE BRANCH
+branchlift remote shell REMOTE BRANCH [--network none|backend|outbound]
+branchlift remote agent REMOTE BRANCH [--read-only-worktree] -- COMMAND ...
+branchlift remote build REMOTE --tag IMAGE [--branch BRANCH] [--network default|none] [--cache-max 20gb]
+branchlift remote cache inspect REMOTE
+branchlift remote cache prune REMOTE --confirm prune
 ```
 
 When an agent is launched, BranchLift supplies:
@@ -270,7 +362,7 @@ BranchLift inspects Compose before mutating runtime state and refuses configurat
 - external named volumes;
 - detected stateful services without a managed named volume.
 
-Shared writable bind mounts are reported as warnings, or blockers when they belong to a stateful service. `.env` is copied with owner-only permissions when it is absent from the worktree.
+Shared writable bind mounts are reported as warnings, or blockers when they belong to a stateful service. Randomized instance ports are always published on loopback rather than widened to every host interface. `.env` is copied with owner-only permissions when it is absent from the worktree; symlink sources and destination-parent escapes are rejected.
 
 Diagnostics include a concrete recommendation for every isolation blocker. Interpolated or absolute bind sources are treated conservatively as shared. Generated overrides replace managed mount targets without deleting unrelated bind, tmpfs, secret, or config mounts from the source project.
 
@@ -278,7 +370,7 @@ Mutating commands acquire owner-stamped filesystem locks. A conflicting command 
 
 Instances created by `spawn` own their generated worktree. Instances created by `attach` mark the current worktree as external. `destroy --worktree` refuses external ownership before stopping or removing anything; plain `destroy` removes only BranchLift runtime state.
 
-BranchLift is environment isolation, **not a security sandbox**. Agents and containers still have whatever host, filesystem, credential, and network access the user gives them. See [SECURITY.md](SECURITY.md).
+`branchlift exec` and explicitly enabled host agent commands are **not** security boundaries. `branchlift sandbox run` adds a hardened Docker boundary around the command, but it is not a VM boundary and it deliberately grants the selected worktree and any scoped backend/secret access. Compose application services retain their own image and Compose security settings. See [SECURITY.md](SECURITY.md) and [docs/SECURITY-AND-SECRETS.md](docs/SECURITY-AND-SECRETS.md).
 
 ## Storage behavior
 
@@ -289,6 +381,10 @@ Runtime state lives outside the repository:
 ├── repos/<repo-id>/snapshots/<name>/volumes/
 ├── repos/<repo-id>/instances/<branch>/volumes[-<generation>]/
 ├── repos/<repo-id>/locks/
+├── repos/<repo-id>/live-sync/
+├── repos/<repo-id>/remote-tunnels/
+├── repos/<repo-id>/events.jsonl
+├── remotes.json
 └── worktrees/<repo-id>/<branch>/
 ```
 
@@ -300,7 +396,7 @@ Copy strategy order:
 2. Linux reflink (`cp --reflink=always`);
 3. safe recursive copy fallback.
 
-Each reset clones into a never-before-mounted volume generation and switches the generated Compose override only after the clone validates. The previous generation is removed after the replacement stack becomes healthy. This avoids Docker Desktop bind-cache races and never exposes a half-copied reset as the active path.
+Each ready snapshot's volume tree is made host-read-only after its digest manifest is written. Provisioning restores owner-only write access to the cloned runtime state, never world-write access. Each reset clones into a never-before-mounted volume generation and switches the generated Compose override only after the clone validates. The previous generation is removed after the replacement stack becomes healthy. This avoids Docker Desktop bind-cache races and never exposes a half-copied reset as the active path.
 
 Measure clone latency against a forced full-copy baseline on your machine:
 
@@ -329,9 +425,18 @@ npm run test:compat
 npm run verify
 ```
 
-See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md), [docs/EVIDENCE.md](docs/EVIDENCE.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [CONTRIBUTING.md](CONTRIBUTING.md) for the exact support contract and public lifecycle evidence.
+See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md), [docs/EVIDENCE.md](docs/EVIDENCE.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SECURITY-AND-SECRETS.md](docs/SECURITY-AND-SECRETS.md), [docs/REMOTE.md](docs/REMOTE.md), and [CONTRIBUTING.md](CONTRIBUTING.md) for the exact support contract and public lifecycle evidence.
 
 The architecture is documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Community
+
+- Bug reports and feature proposals: [GitHub Issues](https://github.com/MuratKomurcu1/BranchLift/issues)
+- Questions and show-and-tell: [GitHub Discussions](https://github.com/MuratKomurcu1/BranchLift/discussions)
+- Contributions: [CONTRIBUTING.md](CONTRIBUTING.md) — `npm run verify` must pass before every PR.
+- Security reports: [SECURITY.md](SECURITY.md) — please use private security advisories rather than public issues.
+
+If BranchLift saves you a reseed cycle, star the repository — it is the main discovery signal for an independent, non-VC project in this category.
 
 ## License and provenance
 

@@ -4,7 +4,7 @@ import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { runCommand } from "../src/process.js";
-import { safeSlug } from "../src/paths.js";
+import { makeTreeOwnerWritable, safeSlug } from "../src/paths.js";
 import { volumeDirectoryName } from "../src/compose.js";
 import { discoverRepo } from "../src/git.js";
 import type { InstanceMetadata } from "../src/types.js";
@@ -15,7 +15,13 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
   const root = await mkdtemp(join(tmpdir(), "branchlift-e2e-repo-"));
   const stateHome = await mkdtemp(join(tmpdir(), "branchlift-e2e-state-"));
   const cli = resolve("dist/src/cli.js");
-  const env = { ...process.env, BRANCHLIFT_HOME: stateHome };
+  const env = {
+    ...process.env,
+    BRANCHLIFT_HOME: stateHome,
+    BRANCHLIFT_E2E_COMPOSE_TOKEN: "compose-scope-value",
+    BRANCHLIFT_E2E_SANDBOX_TOKEN: "sandbox-only-value",
+    BRANCHLIFT_E2E_SANDBOX_FILE: "{\n  \"scope\": \"sandbox\"\n}\n",
+  };
   let orphanNetwork: string | undefined;
   let crashedSnapshotNetwork: string | undefined;
   let activeLockPath: string | undefined;
@@ -30,6 +36,7 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     await run("git", ["config", "user.name", "BranchLift Test"], root, env);
     await run("git", ["add", "."], root, env);
     await run("git", ["commit", "-m", "fixture"], root, env);
+    await run(process.execPath, [cli, "security", "trust"], root, env);
 
     await run(process.execPath, [cli, "snapshot", "dev"], root, env);
     if (process.getuid !== undefined) {
@@ -121,6 +128,38 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     assert.ok(first.volumeRoot);
     assert.equal(await probe(first, "SELECT value FROM branchlift_probe WHERE id = 1"), "golden");
     assert.equal(await mysqlProbe(first, "SELECT value FROM branchlift_mysql_probe WHERE id = 1"), "golden");
+    assert.equal(await serviceEnvironment(first, "redis", "E2E_COMPOSE_TOKEN"), "compose-scope-value");
+
+    await run(
+      process.execPath,
+      [
+        cli,
+        "sandbox",
+        "run",
+        "agent-a",
+        "--image",
+        "alpine:3.22",
+        "--network",
+        "none",
+        "--read-only-worktree",
+        "--",
+        "sh",
+        "-ec",
+        [
+          'test "$BRANCHLIFT_SANDBOX" = "1"',
+          'test "$BRANCHLIFT_E2E_SANDBOX_TOKEN" = "sandbox-only-value"',
+          'test "$(cat /run/secrets/e2e.json)" = "{\n  \\"scope\\": \\"sandbox\\"\n}"',
+          'test ! -e /var/run/docker.sock',
+          'test "$(awk \'/CapEff/ { print $2 }\' /proc/self/status)" = "0000000000000000"',
+          'test -z "$(awk \'NR > 1 && $2 == "00000000" { print $0 }\' /proc/net/route)"',
+          'if touch /workspace/.branchlift-sandbox-write 2>/dev/null; then exit 41; fi',
+          'if touch /etc/.branchlift-sandbox-write 2>/dev/null; then exit 42; fi',
+        ].join("\n"),
+      ],
+      root,
+      env,
+    );
+    await assert.rejects(stat(join(first.worktreePath, ".branchlift-sandbox-write")), /ENOENT/);
 
     await run(
       process.execPath,
@@ -294,6 +333,7 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
         // Product assertions report the original failure; cleanup remains best-effort.
       }
     }
+    await makeTreeOwnerWritable(stateHome).catch(() => undefined);
     await rm(stateHome, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
   }
@@ -360,6 +400,25 @@ async function mysqlSql(instance: InstanceMetadata, query: string): Promise<stri
   return result.stdout;
 }
 
+async function serviceEnvironment(instance: InstanceMetadata, service: string, name: string): Promise<string> {
+  const composeFiles = (instance.composeFiles ?? [instance.composeFile]).flatMap((file) => ["-f", join(instance.worktreePath, file)]);
+  const result = await runCommand("docker", [
+    "compose",
+    ...composeFiles,
+    "-f",
+    instance.overrideFile,
+    "-p",
+    instance.composeProject,
+    "exec",
+    "-T",
+    service,
+    "sh",
+    "-c",
+    `printf %s \"\$${name}\"`,
+  ], { cwd: instance.worktreePath });
+  return result.stdout;
+}
+
 async function run(command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
   const result = await runCommand(command, args, { cwd, env });
   return result.stdout;
@@ -380,6 +439,8 @@ function composeFixture(): string {
       - pgdata:/var/lib/postgresql/data
   redis:
     image: redis:7-alpine
+    environment:
+      E2E_COMPOSE_TOKEN: \${E2E_COMPOSE_TOKEN:-missing}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 1s
@@ -452,5 +513,38 @@ snapshot:
         - CREATE TABLE branchlift_mysql_probe (id integer PRIMARY KEY, value varchar(32) NOT NULL); INSERT INTO branchlift_mysql_probe VALUES (1, 'golden');
 worktree:
   copyFiles: []
+security:
+  sandbox:
+    backend: docker
+    image: alpine:3.22
+    network: none
+    readOnlyRoot: true
+    memory: 512m
+    cpus: 1
+    pidsLimit: 128
+  allowHostAgentCommands: false
+  allowSecretCommands: false
+secrets:
+  e2eCompose:
+    source:
+      env: BRANCHLIFT_E2E_COMPOSE_TOKEN
+    target:
+      env: E2E_COMPOSE_TOKEN
+    scopes: [compose]
+    required: true
+  e2eSandbox:
+    source:
+      env: BRANCHLIFT_E2E_SANDBOX_TOKEN
+    target:
+      env: BRANCHLIFT_E2E_SANDBOX_TOKEN
+    scopes: [sandbox]
+    required: true
+  e2eSandboxFile:
+    source:
+      env: BRANCHLIFT_E2E_SANDBOX_FILE
+    target:
+      file: /run/secrets/e2e.json
+    scopes: [sandbox]
+    required: true
 `;
 }

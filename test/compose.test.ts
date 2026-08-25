@@ -50,6 +50,21 @@ test("generates a Compose override with bind-mounted state and random ports", as
   assert.equal(output.match(/user: "501:20"/g)?.length, 1);
   assert.match(output, /- "\/var\/run\/postgresql:uid=501,gid=20,mode=3775"/);
   assert.doesNotMatch(output, /published:/);
+  assert.equal(output.match(/host_ip: "127\.0\.0\.1"/g)?.length, 3);
+});
+
+test("randomized ports never widen an original loopback binding", async () => {
+  const root = await mkdtemp(join(tmpdir(), "branchlift-compose-loopback-"));
+  try {
+    const compose = join(root, "compose.yaml");
+    await writeFile(compose, `services:\n  db:\n    image: postgres:16\n    ports:\n      - target: 5432\n        published: 15432\n        host_ip: 127.0.0.1\n    volumes: [data:/var/lib/postgresql/data]\nvolumes:\n  data: {}\n`);
+    const inspection = await inspectCompose(compose);
+    const output = generateOverride(inspection, join(root, "state"), { randomizePorts: true, postgresHostUser: false });
+    assert.match(output, /target: 5432\n\s+protocol: tcp\n\s+host_ip: "127\.0\.0\.1"/);
+    assert.doesNotMatch(output, /published:/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("can bootstrap PostgreSQL in an explicitly named Docker volume", async () => {

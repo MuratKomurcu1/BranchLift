@@ -2,6 +2,7 @@ import { composeLogs, composeServiceStatuses } from "./docker.js";
 import { BranchLiftError } from "./errors.js";
 import { runtimeFromMetadata } from "./runtime.js";
 import { listInstances } from "./state.js";
+import { redactInstanceText } from "./secrets.js";
 import type { InstanceMetadata, RepoInfo } from "./types.js";
 
 export interface PreviewEndpoint {
@@ -39,7 +40,8 @@ export async function readInstanceLogs(repo: RepoInfo, branch: string, options: 
   const instance = (await listInstances(repo)).find((candidate) => candidate.branch === branch);
   if (instance === undefined) throw new BranchLiftError(`Instance not found: ${branch}`);
   const result = await composeLogs(runtimeFromMetadata(instance), options);
-  return [result.stdout.trimEnd(), result.stderr.trimEnd()].filter(Boolean).join("\n");
+  const output = [result.stdout.trimEnd(), result.stderr.trimEnd()].filter(Boolean).join("\n");
+  return await redactInstanceText(repo, instance.slug, output);
 }
 
 async function previewInstance(instance: InstanceMetadata): Promise<InstancePreview> {

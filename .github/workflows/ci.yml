@@ -37,6 +37,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: docker compose version
+      - run: docker pull alpine:3.22
       - run: npm run test:e2e
 
   compatibility:

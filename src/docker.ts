@@ -10,12 +10,14 @@ export interface ComposeRuntime {
   composeFiles: string[];
   overrideFile: string;
   project: string;
+  envFile?: string;
 }
 
 export interface SourceComposeRuntime {
   cwd: string;
   composeFiles: string[];
   project?: string;
+  envFile?: string;
 }
 
 export interface ComposeServiceStatus {
@@ -78,6 +80,7 @@ export async function composeUp(
     const logs = await runCommand("docker", [...composeArgs(runtime), "logs", "--no-color", "--tail", "80"], {
       cwd: runtime.cwd,
       allowFailure: true,
+      maxOutputBytes: 4 * 1024 * 1024,
     });
     const detail = [logs.stdout.trim(), logs.stderr.trim()].filter(Boolean).join("\n");
     await normalizeRuntimeStateOwnership(runtime, managedVolumes, volumeRoot);
@@ -366,6 +369,7 @@ export async function publishedPorts(
 
 export function composeArgs(runtime: ComposeRuntime): string[] {
   const args = ["compose"];
+  if (runtime.envFile !== undefined) args.push("--env-file", runtime.envFile);
   for (const file of runtime.composeFiles) args.push("-f", file);
   args.push("-f", runtime.overrideFile, "-p", runtime.project);
   return args;
@@ -373,6 +377,7 @@ export function composeArgs(runtime: ComposeRuntime): string[] {
 
 export function sourceComposeArgs(runtime: SourceComposeRuntime): string[] {
   const args = ["compose"];
+  if (runtime.envFile !== undefined) args.push("--env-file", runtime.envFile);
   for (const file of runtime.composeFiles) args.push("-f", file);
   if (runtime.project !== undefined) args.push("-p", runtime.project);
   return args;

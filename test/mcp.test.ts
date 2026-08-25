@@ -18,7 +18,17 @@ test("MCP initializes with instructions and exposes the BranchLift tool contract
 
   const listed = await handleMcpRequest(repo, { jsonrpc: "2.0", id: 2, method: "tools/list" });
   const names = (listed?.result as { tools: Array<{ name: string }> }).tools.map(({ name }) => name);
-  assert.deepEqual(names, ["branchlift_attach", "branchlift_list", "branchlift_preview", "branchlift_logs"]);
+  assert.deepEqual(names, [
+    "branchlift_attach",
+    "branchlift_list",
+    "branchlift_preview",
+    "branchlift_logs",
+    "branchlift_security",
+    "branchlift_snapshots",
+    "branchlift_snapshot_diff",
+    "branchlift_events",
+    "branchlift_remotes",
+  ]);
 });
 
 test("MCP ignores notifications and returns structured tool errors", async () => {

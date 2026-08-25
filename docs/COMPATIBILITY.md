@@ -25,4 +25,4 @@ Database-specific production claims are narrower than generic Compose parsing:
 - generic managed named volumes are cloned and isolated;
 - other databases need a database-aware mutation/reset probe before being described as production-ready.
 
-Current non-goals: Windows, Podman, external volumes, host networking, fixed container names, production data import, and untrusted-code sandboxing.
+Current non-goals: Windows, Podman, external volumes, host networking, fixed container names, production data import, and VM-grade hostile multi-tenant isolation. `sandbox run` provides a least-privilege Docker boundary for agent commands; it does not turn the project Compose stack into a hostile-code sandbox.

@@ -1,10 +1,16 @@
 import { createInterface } from "node:readline";
 import { currentBranch } from "./git.js";
-import { inspectConfiguredCompose, loadConfig } from "./config.js";
+import { effectiveSecurity, inspectConfiguredCompose, loadConfig } from "./config.js";
 import { BranchLiftError } from "./errors.js";
+import { listEvents } from "./events.js";
+import { diffSnapshots } from "./manifest.js";
 import { previewInstances, readInstanceLogs } from "./preview.js";
+import { inspectPolicyTrust } from "./policy.js";
+import { listRemotes } from "./remote.js";
 import { ensureAttachedInstance, instanceContext } from "./runtime.js";
-import { listInstances } from "./state.js";
+import { sandboxPosture } from "./sandbox.js";
+import { inspectSecrets } from "./secrets.js";
+import { listInstances, listSnapshots } from "./state.js";
 import type { RepoInfo } from "./types.js";
 import { version } from "./version.js";
 
@@ -67,6 +73,48 @@ const tools = [
     },
     annotations: { title: "Read BranchLift logs", readOnlyHint: true, destructiveHint: false, idempotentHint: true },
   },
+  {
+    name: "branchlift_security",
+    description: "Inspect the effective sandbox boundary, network policy, resource limits, host-execution policy, and secret availability without exposing secret values.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { title: "Inspect BranchLift security", readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "branchlift_snapshots",
+    description: "List immutable state snapshots, lineage parents, content digests, sizes, and status.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { title: "List BranchLift snapshots", readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "branchlift_snapshot_diff",
+    description: "Compare two immutable snapshot manifests without starting the backend.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        left: { type: "string", description: "Base snapshot name." },
+        right: { type: "string", description: "Target snapshot name." },
+      },
+      required: ["left", "right"],
+      additionalProperties: false,
+    },
+    annotations: { title: "Diff BranchLift snapshots", readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "branchlift_events",
+    description: "Read the repository's redacted BranchLift audit trail.",
+    inputSchema: {
+      type: "object",
+      properties: { limit: { type: "integer", minimum: 1, maximum: 1000, default: 100 } },
+      additionalProperties: false,
+    },
+    annotations: { title: "Read BranchLift audit events", readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
+  {
+    name: "branchlift_remotes",
+    description: "List configured SSH worker targets without returning private identity-file paths.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { title: "List BranchLift remotes", readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+  },
 ] as const;
 
 export async function runMcpServer(repo: RepoInfo): Promise<void> {
@@ -103,7 +151,7 @@ export async function handleMcpRequest(repo: RepoInfo, value: unknown): Promise<
           protocolVersion: requested,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "branchlift", version },
-          instructions: "Use branchlift_attach before tests that need backend state. Use branchlift_preview for exact ports and health, and branchlift_logs to diagnose startup or test failures. BranchLift instances are isolated per Git branch.",
+          instructions: "Use branchlift_attach before tests that need backend state. Use branchlift_preview for exact ports and health, branchlift_logs for diagnostics, branchlift_security before untrusted execution, and branchlift_snapshot_diff to understand state changes. BranchLift instances are isolated per Git branch.",
         },
       };
     }
@@ -160,6 +208,35 @@ async function callTool(repo: RepoInfo, name: string, args: Record<string, unkno
         timestamps: optionalBoolean(args.timestamps, "timestamps") ?? false,
       }),
     };
+  }
+  if (name === "branchlift_security") {
+    assertKeys(args, []);
+    const config = await loadConfig(repo);
+    return {
+      policy: await inspectPolicyTrust(repo, config),
+      sandbox: sandboxPosture(config),
+      hostAgentCommands: effectiveSecurity(config).allowHostAgentCommands,
+      secretCommandSources: effectiveSecurity(config).allowSecretCommands,
+      secrets: await inspectSecrets(repo, config),
+    };
+  }
+  if (name === "branchlift_snapshots") {
+    assertKeys(args, []);
+    return await listSnapshots(repo);
+  }
+  if (name === "branchlift_snapshot_diff") {
+    assertKeys(args, ["left", "right"]);
+    return await diffSnapshots(repo, stringValue(args.left, "left"), stringValue(args.right, "right"));
+  }
+  if (name === "branchlift_events") {
+    assertKeys(args, ["limit"]);
+    const limit = optionalInteger(args.limit, "limit") ?? 100;
+    if (limit < 1 || limit > 1000) throw new BranchLiftError("limit must be between 1 and 1000.");
+    return await listEvents(repo, limit);
+  }
+  if (name === "branchlift_remotes") {
+    assertKeys(args, []);
+    return (await listRemotes()).map(({ identityFile, ...remote }) => ({ ...remote, identityConfigured: identityFile !== undefined }));
   }
   throw new BranchLiftError(`Unknown MCP tool: ${name}`);
 }

@@ -11,6 +11,13 @@ export function branchliftHome(): string {
   return resolve(configured && configured.trim() !== "" ? configured : join(homedir(), ".branchlift"));
 }
 
+export async function ensurePrivateStateRoot(): Promise<string> {
+  const root = branchliftHome();
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  await chmod(root, 0o700);
+  return root;
+}
+
 export function repoDataRoot(repo: RepoInfo): string {
   return join(branchliftHome(), "repos", repo.key);
 }
@@ -54,6 +61,7 @@ export async function pathExists(path: string): Promise<boolean> {
 }
 
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
+  await ensurePrivateStateRoot();
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
@@ -65,6 +73,7 @@ export async function readJson<T>(path: string): Promise<T> {
 }
 
 export async function createExclusiveDirectory(path: string): Promise<void> {
+  await ensurePrivateStateRoot();
   try {
     await mkdir(path, { recursive: false });
   } catch (error) {
@@ -120,12 +129,21 @@ export async function copyDirectoryFull(source: string, destination: string): Pr
   await copyDirectoryEntries(source, destination, entries);
 }
 
-export async function makeTreeContainerWritable(path: string): Promise<void> {
+export async function makeTreeOwnerWritable(path: string): Promise<void> {
   const info = await lstat(path);
   if (info.isSymbolicLink()) return;
-  await chmod(path, (info.mode & 0o777) | (info.isDirectory() ? 0o777 : 0o666));
+  await chmod(path, (info.mode & 0o7777) | (info.isDirectory() ? 0o700 : 0o600));
   if (!info.isDirectory()) return;
-  for (const entry of await readdir(path)) await makeTreeContainerWritable(join(path, entry));
+  for (const entry of await readdir(path)) await makeTreeOwnerWritable(join(path, entry));
+}
+
+export async function makeTreeReadOnly(path: string): Promise<void> {
+  const info = await lstat(path);
+  if (info.isSymbolicLink()) return;
+  if (info.isDirectory()) {
+    for (const entry of await readdir(path)) await makeTreeReadOnly(join(path, entry));
+  }
+  await chmod(path, (info.mode & 0o7777) & ~0o222);
 }
 
 async function copyDirectoryEntries(source: string, destination: string, entries: string[]): Promise<void> {

@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { BranchLiftError } from "./errors.js";
-import { pathExists, repoKey } from "./paths.js";
+import { ensurePrivateStateRoot, pathExists, repoKey } from "./paths.js";
 import { runCommand } from "./process.js";
 import type { RepoInfo } from "./types.js";
 
@@ -28,8 +28,12 @@ export async function currentBranch(repo: RepoInfo): Promise<string> {
   return branch;
 }
 
-export async function createWorktree(repo: RepoInfo, branch: string, target: string): Promise<void> {
+export async function createWorktree(repo: RepoInfo, branch: string, target: string, startPoint?: string): Promise<void> {
+  await ensurePrivateStateRoot();
   await assertValidBranch(repo, branch);
+  if (startPoint !== undefined && !safeRevision(startPoint)) {
+    throw new BranchLiftError(`Unsafe worktree start point: ${startPoint}`);
+  }
   if (await pathExists(target)) {
     throw new BranchLiftError(`Worktree path already exists: ${target}`);
   }
@@ -40,9 +44,19 @@ export async function createWorktree(repo: RepoInfo, branch: string, target: str
     allowFailure: true,
   });
   if (exists.exitCode === 0) {
+    if (startPoint !== undefined) {
+      const branchCommit = (await runCommand("git", ["rev-parse", `refs/heads/${branch}^{commit}`], { cwd: repo.root })).stdout.trim();
+      const requestedCommit = (await runCommand("git", ["rev-parse", `${startPoint}^{commit}`], { cwd: repo.root })).stdout.trim();
+      if (branchCommit !== requestedCommit) {
+        throw new BranchLiftError(
+          `Branch ${branch} already exists at a different commit.`,
+          "Choose a new branch name; BranchLift will not rewrite an existing remote branch.",
+        );
+      }
+    }
     await runCommand("git", ["worktree", "add", target, branch], { cwd: repo.root });
   } else {
-    await runCommand("git", ["worktree", "add", "-b", branch, target, "HEAD"], {
+    await runCommand("git", ["worktree", "add", "-b", branch, target, startPoint ?? "HEAD"], {
       cwd: repo.root,
     });
   }
@@ -76,4 +90,9 @@ async function assertValidBranch(repo: RepoInfo, branch: string): Promise<void> 
     allowFailure: true,
   });
   if (result.exitCode !== 0) throw new BranchLiftError(`Invalid Git branch name: ${branch}`);
+}
+
+function safeRevision(value: string): boolean {
+  return value.length > 0 && value.length <= 300 && !value.startsWith("-")
+    && /^[A-Za-z0-9][A-Za-z0-9/._@+-]*$/.test(value);
 }

@@ -66,3 +66,55 @@ test("auto-discovers the standard Compose override and existing local env files"
   assert.deepEqual(preview.inspection.ports.map(({ target }) => target), [3306]);
   await assert.rejects(readFile(join(root, "branchlift.yaml")), /ENOENT/);
 });
+
+test("loads strict sandbox, secret broker, and loopback UI policy", async () => {
+  const root = await mkdtemp(join(tmpdir(), "branchlift-config-security-"));
+  await writeFile(join(root, "compose.yaml"), "services:\n  redis:\n    image: redis:7\n    volumes: [data:/data]\nvolumes:\n  data: {}\n");
+  await writeFile(
+    join(root, "branchlift.yaml"),
+    `version: 1
+compose:
+  files: [compose.yaml]
+  statefulServices: [redis]
+snapshot:
+  default: dev
+  healthTimeoutSeconds: 120
+  seed: []
+worktree:
+  copyFiles: []
+security:
+  sandbox:
+    backend: docker
+    image: node:22-bookworm-slim
+    network: backend
+    readOnlyRoot: true
+    memory: 2g
+    cpus: 1.5
+    pidsLimit: 256
+  allowHostAgentCommands: false
+  allowSecretCommands: false
+secrets:
+  api:
+    source: { env: TEST_API_TOKEN }
+    target: { env: API_TOKEN }
+    scopes: [sandbox, exec]
+    required: true
+ui: { host: 127.0.0.1, port: 7788 }
+`,
+  );
+  const repo: RepoInfo = { root, commonDir: join(root, ".git"), name: "demo", key: "demo-key" };
+
+  const loaded = await loadConfig(repo);
+  assert.equal(loaded.security?.sandbox.network, "backend");
+  assert.equal(loaded.security?.sandbox.cpus, 1.5);
+  assert.deepEqual(loaded.secrets?.api?.target, { env: "API_TOKEN" });
+  assert.deepEqual(loaded.secrets?.api?.scopes, ["sandbox", "exec"]);
+  assert.equal(loaded.ui?.host, "127.0.0.1");
+
+  await writeFile(
+    join(root, "branchlift.yaml"),
+    (await readFile(join(root, "branchlift.yaml"), "utf8"))
+      .replace("target: { env: API_TOKEN }", "target: { file: \"/run/secrets/token,readonly\" }"),
+  );
+  await assert.rejects(loadConfig(repo), /absolute path below \/run\/secrets/);
+});
