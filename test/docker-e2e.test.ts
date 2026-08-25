@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { runCommand } from "../src/process.js";
 import { safeSlug } from "../src/paths.js";
+import { volumeDirectoryName } from "../src/compose.js";
+import { discoverRepo } from "../src/git.js";
 import type { InstanceMetadata } from "../src/types.js";
 
 const enabled = process.env.BRANCHLIFT_E2E === "1";
@@ -30,6 +32,20 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     await run("git", ["commit", "-m", "fixture"], root, env);
 
     await run(process.execPath, [cli, "snapshot", "dev"], root, env);
+    if (process.getuid !== undefined) {
+      const repo = await discoverRepo(root);
+      const redisState = join(
+        stateHome,
+        "repos",
+        repo.key,
+        "snapshots",
+        safeSlug("dev"),
+        "volumes",
+        volumeDirectoryName("redisdata"),
+        "dump.rdb",
+      );
+      assert.equal((await stat(redisState)).uid, process.getuid(), "snapshot exports must be owned by the invoking user");
+    }
     const snapshots = JSON.parse(
       await run(process.execPath, [cli, "snapshot", "list", "--json"], root, env),
     ) as Array<{ name: string; status: string }>;

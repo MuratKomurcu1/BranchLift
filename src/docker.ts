@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { BranchLiftError } from "./errors.js";
 import { runCommand } from "./process.js";
 import type { ComposeInspection, PublishedPort, VolumeBinding } from "./types.js";
@@ -190,9 +191,7 @@ export async function copySourceServicePathToHost(
       "Run the source stack at least once with docker compose up -d, then retry the import.",
     );
   }
-  await runCommand("docker", ["cp", `${id}:${sourcePath.replace(/\/$/, "")}/.`, destination], {
-    cwd: runtime.cwd,
-  });
+  await extractContainerPath(id, sourcePath, destination, runtime.cwd);
 }
 
 export async function copyServicePathToHost(
@@ -206,10 +205,7 @@ export async function copyServicePathToHost(
   });
   const id = container.stdout.trim().split("\n").find(Boolean);
   if (id === undefined) throw new BranchLiftError(`Cannot find the stopped ${service} container for snapshot export.`);
-  await runCommand("docker", ["cp", `${id}:${sourcePath.replace(/\/$/, "")}/.`, destination], {
-    cwd: runtime.cwd,
-    stdio: "inherit",
-  });
+  await extractContainerPath(id, sourcePath, destination, runtime.cwd);
 }
 
 export async function removeDockerVolumes(names: Iterable<string>, allowFailure = false): Promise<void> {
@@ -275,6 +271,60 @@ export function sourceComposeArgs(runtime: SourceComposeRuntime): string[] {
   for (const file of runtime.composeFiles) args.push("-f", file);
   if (runtime.project !== undefined) args.push("-p", runtime.project);
   return args;
+}
+
+async function extractContainerPath(
+  container: string,
+  sourcePath: string,
+  destination: string,
+  cwd: string,
+): Promise<void> {
+  const source = `${container}:${sourcePath.replace(/\/$/, "")}/.`;
+  const docker = spawn("docker", ["cp", source, "-"], {
+    cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: false,
+  });
+  const tar = spawn("tar", ["-x", "--no-same-owner", "-f", "-", "-C", destination], {
+    cwd,
+    stdio: ["pipe", "ignore", "pipe"],
+    shell: false,
+  });
+  if (docker.stdout === null || tar.stdin === null) {
+    docker.kill();
+    tar.kill();
+    throw new BranchLiftError(`Unable to create the snapshot export pipeline for ${sourcePath}.`);
+  }
+  docker.stdout.pipe(tar.stdin);
+  // If tar exits first, the pipe can report EPIPE while both process exit codes
+  // still contain the useful diagnostic.
+  tar.stdin.on("error", () => undefined);
+  try {
+    const [dockerResult, tarResult] = await Promise.all([childResult(docker), childResult(tar)]);
+    if (dockerResult.exitCode !== 0 || tarResult.exitCode !== 0) {
+      const detail = [dockerResult.stderr, tarResult.stderr].map((value) => value.trim()).filter(Boolean).join("\n");
+      throw new BranchLiftError(
+        `Unable to export ${sourcePath} from the stopped container.`,
+        detail === "" ? `docker cp exited ${dockerResult.exitCode}; tar exited ${tarResult.exitCode}` : detail,
+      );
+    }
+  } catch (error) {
+    docker.kill();
+    tar.kill();
+    throw error;
+  }
+}
+
+async function childResult(child: ChildProcess): Promise<{ exitCode: number; stderr: string }> {
+  return await new Promise((resolvePromise, rejectPromise) => {
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", rejectPromise);
+    child.once("close", (code) => resolvePromise({ exitCode: code ?? 1, stderr }));
+  });
 }
 
 function parseAddress(value: string): { host: string; port: number } | undefined {
