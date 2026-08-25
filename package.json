@@ -1,6 +1,6 @@
 {
   "name": "branchlift",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Stateful backend environments for parallel coding agents and git worktrees.",
   "homepage": "https://github.com/MuratKomurcu1/BranchLift#readme",
   "repository": {

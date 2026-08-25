@@ -22,6 +22,8 @@ jobs:
         run: npm install --global npm@11
       - run: npm ci
       - run: npm run verify
+      - name: Preload the explicitly approved sandbox test image
+        run: docker pull alpine:3.22
       - run: npm run test:e2e
       - name: Build release tarball
         run: npm pack

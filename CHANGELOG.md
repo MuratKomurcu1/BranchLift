@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.2
+
+- Fix release automation by preloading the explicitly approved Alpine sandbox image before the full Docker E2E publication gate.
+
 ## 1.3.1
 
 - Fix Linux fallback cloning from immutable snapshots on filesystems without reflink support: partial GNU `cp` trees are made owner-writable before cleanup, clone ownership stays with the invoking user, and database-owned instance trees are reclaimed before destroy.
