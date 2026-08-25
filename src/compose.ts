@@ -194,6 +194,8 @@ export function generateOverride(
     randomizePorts: boolean;
     postgresHostUser?: { uid: number; gid: number } | false;
     mysqlHostUser?: { uid: number; gid: number } | false;
+    bindHostUser?: { uid: number; gid: number } | false;
+    hostUserServices?: ReadonlySet<string>;
     mysqlLowerCaseTableNames?: 0 | 1 | 2 | false;
     nativeVolumes?: ReadonlyMap<string, string>;
   },
@@ -204,6 +206,10 @@ export function generateOverride(
   const mysqlHostUser = options.mysqlHostUser === false
     ? undefined
     : options.mysqlHostUser ?? localMysqlBindUser();
+  const bindHostUser = options.bindHostUser === false
+    ? undefined
+    : options.bindHostUser ?? localBindUser();
+  const hostUserServices = options.hostUserServices ?? new Set(inspection.inferredStatefulServices);
   const mysqlLowerCaseTableNames = options.mysqlLowerCaseTableNames === false
     ? undefined
     : options.mysqlLowerCaseTableNames ?? 1;
@@ -267,6 +273,18 @@ export function generateOverride(
         );
         lines.push(`    command: ${Array.isArray(command) ? JSON.stringify(command) : quote(command)}`);
       }
+    }
+    const hasWritableBind = serviceVolumes.some(
+      (volume) => !volume.readOnly && !nativeVolumes.has(volume.source),
+    );
+    if (
+      bindHostUser !== undefined
+      && hasWritableBind
+      && hostUserServices.has(service)
+      && !inspection.postgresServices.includes(service)
+      && !inspection.mysqlServices.includes(service)
+    ) {
+      lines.push(`    user: ${quote(`${bindHostUser.uid}:${bindHostUser.gid}`)}`);
     }
     const servicePorts = portsByService.get(service) ?? [];
     if (servicePorts.length > 0) {

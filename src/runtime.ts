@@ -238,7 +238,13 @@ async function provisionInstanceLocked(
     }
 
     await copyConfiguredFiles(repo, config, worktreePath);
-    await writeFile(overrideFile, generateOverride(inspection, volumeRoot, { randomizePorts: true }));
+    await writeFile(
+      overrideFile,
+      generateOverride(inspection, volumeRoot, {
+        randomizePorts: true,
+        hostUserServices: new Set([...inspection.inferredStatefulServices, ...config.compose.statefulServices]),
+      }),
+    );
     await writeInstanceMetadata(repo, slug, metadata);
     const runtime = { cwd: worktreePath, composeFiles, overrideFile, project: composeProject };
     await validateCompose(runtime);
@@ -374,7 +380,13 @@ async function resetInstanceLocked(
       copyStrategy = mergeStrategies(copyStrategy, await cloneDirectory(source, destination));
     }
 
-    await writeFile(overrideFile, generateOverride(inspection, volumeRoot, { randomizePorts: true }));
+    await writeFile(
+      overrideFile,
+      generateOverride(inspection, volumeRoot, {
+        randomizePorts: true,
+        hostUserServices: new Set([...inspection.inferredStatefulServices, ...config.compose.statefulServices]),
+      }),
+    );
     const runtime = {
       cwd: metadata.worktreePath,
       composeFiles: (metadata.composeFiles ?? [metadata.composeFile]).map((file) => resolve(metadata.worktreePath, file)),

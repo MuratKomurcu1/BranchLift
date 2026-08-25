@@ -31,7 +31,7 @@ Source Compose files are never rewritten. BranchLift generates an additional fin
 
 Every managed volume is initialized in temporary Docker-native storage, then exported from its cleanly stopped service as host-owned snapshot files. This preserves the filesystem behavior images expect during bootstrap and prevents image-owned directories (for example Redis data) from blocking snapshot deletion on Linux.
 
-PostgreSQL receives a nested `PGDATA` directory. Cloned instances use the invoking non-root UID/GID for the container and socket tmpfs. This avoids bind ownership races while preserving APFS/reflink cloning for normal spawn and reset operations.
+Cloned instances run configured stateful services against managed writable binds as the invoking non-root UID/GID. PostgreSQL additionally receives a nested `PGDATA` directory and socket tmpfs. This prevents a container from taking ownership of branch state while preserving APFS/reflink cloning for normal spawn and reset operations.
 
 MySQL bootstrap and cloned instances use `lower_case_table_names=1`, because that value is valid on case-sensitive and case-insensitive filesystems and the setting must match the initialized data dictionary.
 

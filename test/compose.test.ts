@@ -38,6 +38,7 @@ test("generates a Compose override with bind-mounted state and random ports", as
   const output = generateOverride(inspection, "/tmp/fork stack/volumes", {
     randomizePorts: true,
     postgresHostUser: { uid: 501, gid: 20 },
+    bindHostUser: { uid: 501, gid: 20 },
   });
 
   assert.match(output, /\n    volumes:\n/);
@@ -46,7 +47,7 @@ test("generates a Compose override with bind-mounted state and random ports", as
   assert.match(output, /source: "\/tmp\/fork stack\/volumes\/pgdata-[a-f0-9]{7}"/);
   assert.match(output, /target: "\/var\/lib\/postgresql\/data"/);
   assert.match(output, /PGDATA: "\/var\/lib\/postgresql\/data\/\.branchlift-pgdata"/);
-  assert.match(output, /user: "501:20"/);
+  assert.equal(output.match(/user: "501:20"/g)?.length, 2);
   assert.match(output, /- "\/var\/run\/postgresql:uid=501,gid=20,mode=3775"/);
   assert.doesNotMatch(output, /published:/);
 });
@@ -57,6 +58,7 @@ test("can bootstrap PostgreSQL in an explicitly named Docker volume", async () =
     randomizePorts: true,
     nativeVolumes: new Map([["pgdata", "branchlift-postgres-bootstrap"]]),
     postgresHostUser: false,
+    bindHostUser: false,
   });
 
   assert.match(output, /type: volume\n\s+source: "pgdata"/);
