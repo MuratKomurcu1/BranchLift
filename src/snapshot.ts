@@ -1,7 +1,7 @@
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { generateOverride, mysqlDataVolumes, postgresDataVolumes, volumeDirectoryName } from "./compose.js";
+import { generateOverride, volumeDirectoryName } from "./compose.js";
 import {
   assertDockerReady,
   composeDown,
@@ -62,8 +62,12 @@ async function createSnapshotUnlocked(
   const staging = join(parent, `.building-${safeSlug(name)}-${buildId}`);
   const volumeRoot = join(staging, "volumes");
   const project = projectName(repo, `snapshot-${name}`);
-  const nativeBootstrapVolumes = [...postgresDataVolumes(inspection), ...mysqlDataVolumes(inspection)];
-  const nativeExports = [...new Map(nativeBootstrapVolumes.map((volume) => [volume.source, volume])).values()];
+  // Build every managed volume in Docker-native storage first. Besides giving
+  // databases their expected filesystem semantics during initialization, the
+  // subsequent `docker cp` export makes the immutable snapshot host-owned.
+  // Direct bind bootstrap can otherwise leave files owned by an image user
+  // (Redis commonly does this), making snapshot cleanup fail on Linux.
+  const nativeExports = [...new Map(inspection.volumes.map((volume) => [volume.source, volume])).values()];
   const nativeVolumes = new Map(
     nativeExports.map((volume) => [
       volume.source,
@@ -77,11 +81,6 @@ async function createSnapshotUnlocked(
   for (const volume of nativeExports) {
     await rm(join(volumeRoot, volumeDirectoryName(volume.source)), { recursive: true, force: true });
   }
-  for (const volume of postgresDataVolumes(inspection)) {
-    if (nativeVolumes.has(volume.source)) continue;
-    await mkdir(join(volumeRoot, volumeDirectoryName(volume.source), ".branchlift-pgdata"), { recursive: true });
-  }
-
   const overrideFile = join(staging, "snapshot.override.yaml");
   await writeFile(
     overrideFile,

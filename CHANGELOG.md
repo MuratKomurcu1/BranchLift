@@ -7,6 +7,7 @@
 - Add `branchlift preview` with live Compose state/health and `branchlift logs` with service, tail, follow, and timestamp controls.
 - Add a pinned, digest-resolved Docmost benchmark with equivalent seeded state, raw samples, negative controls, and separate clone versus end-to-end metrics.
 - Add npm/Homebrew release packaging and one-command install documentation.
+- Bootstrap every managed volume in Docker-native storage and export host-owned files, preventing image-owned state from blocking cleanup on Linux.
 
 ## 1.0.0
 

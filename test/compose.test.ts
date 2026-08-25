@@ -11,6 +11,7 @@ import {
   volumeDirectoryName,
 } from "../src/compose.js";
 import { runCommand } from "../src/process.js";
+import { hasDockerComposeCli } from "./docker-availability.js";
 
 const fixture = (name: string) => resolve("fixtures", name);
 
@@ -98,7 +99,7 @@ test("volume directory names are stable and path-safe", () => {
   assert.doesNotMatch(volumeDirectoryName("../../danger"), /\//);
 });
 
-test("generated state mounts preserve unrelated Compose bind mounts", async () => {
+test("generated state mounts preserve unrelated Compose bind mounts", { skip: !hasDockerComposeCli }, async () => {
   const root = await mkdtemp(join(tmpdir(), "branchlift-compose-mounts-"));
   try {
     const base = join(root, "compose.yaml");

@@ -13,8 +13,9 @@ import {
   writeSnapshotMetadata,
 } from "../src/state.js";
 import type { InstanceMetadata, RepoInfo, SnapshotMetadata } from "../src/types.js";
+import { hasDockerComposeCli } from "./docker-availability.js";
 
-test("doctor finds orphan Docker projects and reconciles stale running metadata", async () => {
+test("doctor finds orphan Docker projects and reconciles stale running metadata", { skip: !hasDockerComposeCli }, async () => {
   await withState(async (repo) => {
     const metadata = await createHealthyState(repo, "running");
     const orphan = `bl-${repo.key.slice(-12)}-orphan-runtime`;

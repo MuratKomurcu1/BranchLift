@@ -29,19 +29,22 @@ The inspector parses a single Compose file directly. For multiple files it asks 
 
 Source Compose files are never rewritten. BranchLift generates an additional final override. Managed volume targets are replaced through Compose's unique-resource merge rules, preserving unrelated bind, tmpfs, secret, and config mounts. Ports use Compose's `!override` tag and omit fixed host ports so Docker assigns collision-free ports.
 
-PostgreSQL receives a nested `PGDATA` directory. On macOS and Linux, initial snapshot bootstrap runs in a temporary Docker-native volume and exports the cleanly stopped data as host-owned files; cloned instances then use the invoking non-root UID/GID for the container and socket tmpfs. This avoids bind ownership races while preserving APFS/reflink cloning for normal spawn and reset operations.
+Every managed volume is initialized in temporary Docker-native storage, then exported from its cleanly stopped service as host-owned snapshot files. This preserves the filesystem behavior images expect during bootstrap and prevents image-owned directories (for example Redis data) from blocking snapshot deletion on Linux.
 
-MySQL uses the same native-volume bootstrap/export path. Both bootstrap and cloned instances use `lower_case_table_names=1`, because that value is valid on case-sensitive and case-insensitive filesystems and the setting must match the initialized data dictionary.
+PostgreSQL receives a nested `PGDATA` directory. Cloned instances use the invoking non-root UID/GID for the container and socket tmpfs. This avoids bind ownership races while preserving APFS/reflink cloning for normal spawn and reset operations.
+
+MySQL bootstrap and cloned instances use `lower_case_table_names=1`, because that value is valid on case-sensitive and case-insensitive filesystems and the setting must match the initialized data dictionary.
 
 ## Snapshot consistency
 
 Snapshot creation follows this order:
 
-1. create empty managed state directories;
+1. create temporary Docker-native volumes for managed state;
 2. start the Compose stack and wait for health;
 3. run configured seed commands;
-4. stop and remove containers cleanly;
-5. mark the snapshot immutable and ready.
+4. stop containers cleanly and export every volume to host-owned files;
+5. remove bootstrap containers and volumes;
+6. mark the snapshot immutable and ready.
 
 Filesystem cloning is never performed from a running database.
 

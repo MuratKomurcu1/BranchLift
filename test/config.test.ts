@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { initializeConfig, loadConfig } from "../src/config.js";
 import type { RepoInfo } from "../src/types.js";
+import { hasDockerComposeCli } from "./docker-availability.js";
 
 test("initializes and reloads a deterministic project config", async () => {
   const root = await mkdtemp(join(tmpdir(), "branchlift-config-"));
@@ -23,7 +24,7 @@ test("initializes and reloads a deterministic project config", async () => {
   assert.match(await readFile(join(root, "branchlift.yaml"), "utf8"), /Commit this file/);
 });
 
-test("merges multiple Compose files and loads legacy single-file config", async () => {
+test("merges multiple Compose files and loads legacy single-file config", { skip: !hasDockerComposeCli }, async () => {
   const root = await mkdtemp(join(tmpdir(), "branchlift-config-multi-"));
   await writeFile(
     join(root, "compose.yaml"),
@@ -47,7 +48,7 @@ test("merges multiple Compose files and loads legacy single-file config", async 
   assert.deepEqual((await loadConfig(repo)).compose.files, ["compose.yaml"]);
 });
 
-test("auto-discovers the standard Compose override and existing local env files", async () => {
+test("auto-discovers the standard Compose override and existing local env files", { skip: !hasDockerComposeCli }, async () => {
   const root = await mkdtemp(join(tmpdir(), "branchlift-config-auto-"));
   await writeFile(
     join(root, "compose.yaml"),
