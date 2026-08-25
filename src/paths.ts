@@ -153,7 +153,14 @@ async function copyDirectoryEntries(source: string, destination: string, entries
 }
 
 async function resetCopyDestination(destination: string): Promise<void> {
-  await rm(destination, { recursive: true, force: true });
+  try {
+    await rm(destination, { recursive: true, force: true });
+  } catch (error) {
+    if (process.env.BRANCHLIFT_DEBUG === "1") {
+      process.stderr.write(`[branchlift-debug] resetCopyDestination failed for ${destination}\n${error instanceof Error ? error.stack : String(error)}\n`);
+    }
+    throw error;
+  }
   await mkdir(destination, { recursive: true });
 }
 

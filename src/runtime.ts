@@ -594,8 +594,14 @@ async function destroyInstanceLocked(
   if (!resolvedRoot.startsWith(`${managedParent}/`)) {
     throw new BranchLiftError(`Refusing to remove a path outside BranchLift state: ${resolvedRoot}`);
   }
-  await reclaimManagedTreeOwnership(runtime, metadata.managedVolumes ?? [], metadata.volumeRoot).catch(() => undefined);
-  await rm(resolvedRoot, { recursive: true, force: false });
+  try {
+    await rm(resolvedRoot, { recursive: true, force: false });
+  } catch (error) {
+    if (process.env.BRANCHLIFT_DEBUG === "1") {
+      process.stderr.write(`[branchlift-debug] destroyInstance rm failed for ${resolvedRoot}\n${error instanceof Error ? error.stack : String(error)}\n`);
+    }
+    throw error;
+  }
   return { runtimeRemoved: true, worktreeRemoved };
 }
 
