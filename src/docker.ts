@@ -117,16 +117,21 @@ export async function normalizeRuntimeStateOwnership(
   if (process.getuid === undefined || process.getgid === undefined || process.getuid() === 0) return;
   const owner = `${process.getuid()}:${process.getgid()}`;
   const unique = new Map(volumes.map((volume) => [`${volume.service}\0${volume.target}`, volume]));
-  let helperImages: string[] | undefined;
+  const helperImages = volumeRoot === undefined
+    ? []
+    : await runtimeStateHelperImages(runtime, [...unique.values()].map(({ service }) => service));
   for (const volume of unique.values()) {
     if (volume.readOnly) continue;
-    const direct = await runCommand(
+    await runCommand(
       "docker",
       [...composeArgs(runtime), "exec", "-T", "--user", "0", volume.service, "chown", "-R", owner, volume.target],
       { cwd: runtime.cwd, allowFailure: true },
     );
-    if (direct.exitCode === 0 || volumeRoot === undefined) continue;
-    helperImages ??= await runtimeStateHelperImages(runtime, [...unique.values()].map(({ service }) => service));
+  }
+  await runCommand("docker", [...composeArgs(runtime), "stop"], { cwd: runtime.cwd, allowFailure: true });
+  if (volumeRoot === undefined) return;
+  for (const volume of unique.values()) {
+    if (volume.readOnly) continue;
     const source = join(volumeRoot, volumeDirectoryName(volume.source));
     await chownRuntimeDirectory(runtime, helperImages, source, owner);
   }
