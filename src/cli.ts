@@ -2,9 +2,10 @@
 
 import { pathToFileURL } from "node:url";
 import { realpath } from "node:fs/promises";
-import { relative } from "node:path";
+import { join, relative } from "node:path";
 import { displayInstallPath, installAgentIntegrations, parseAgentName } from "./agents.js";
 import { benchmarkSnapshot } from "./benchmark.js";
+import { inspectHostPlatform } from "./container.js";
 import { effectiveSecurity, initializeConfig, inspectConfiguredCompose, loadConfig } from "./config.js";
 import { assertDockerReady } from "./docker.js";
 import { applyDoctorFixes, auditState, inspectDockerProjects } from "./doctor.js";
@@ -52,10 +53,13 @@ import {
 } from "./runtime.js";
 import { commitSnapshotFromInstance, createSnapshot, importSnapshot } from "./snapshot.js";
 import { deleteSnapshot, listInstances, listSnapshots } from "./state.js";
-import type { ComposeInspection, InstanceMetadata, RepoInfo } from "./types.js";
+import { quickstartRepository, scaffoldDemoProject } from "./quickstart.js";
+import { createTeamToken, listTeamRegistry, listTeamTokens, parseTeamRole, publishTeamRegistry, revokeTeamToken } from "./team.js";
+import type { ComposeInspection, InstanceMetadata, RepoInfo, WorkspaceTask } from "./types.js";
 import type { SandboxBackend, SandboxNetwork } from "./types.js";
 import { runUiServer } from "./ui.js";
 import { version } from "./version.js";
+import { createWorkspaceTask, deleteWorkspaceTask, listWorkspaceTasks, moveWorkspaceTask, parseWorkspaceTaskStatus } from "./workspace.js";
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const args = [...argv];
@@ -100,6 +104,40 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
 
   try {
+    if (command === "platform") {
+      const json = takeFlag(args, "--json");
+      assertNoArgs(args);
+      const support = await inspectHostPlatform();
+      if (json) console.log(JSON.stringify(support, null, 2));
+      else {
+        console.log(`Host: ${support.platform} (${support.environment})`);
+        console.log(`Container CLI: ${support.containerCli}`);
+        console.log(`Support: ${support.supported ? "supported" : "unsupported"}`);
+        console.log(support.guidance);
+      }
+      return support.supported ? 0 : 2;
+    }
+    if (command === "demo") {
+      const directory = takeOption(args, "--directory") ?? join(process.cwd(), "branchlift-demo");
+      const noRun = takeFlag(args, "--no-run");
+      const json = takeFlag(args, "--json");
+      assertNoArgs(args);
+      const demoRepo = await scaffoldDemoProject(directory);
+      if (noRun) {
+        await initializeConfig(demoRepo);
+        const result = { repository: demoRepo.root, ready: false, next: "branchlift quickstart agent/demo --trust-policy" };
+        if (json) console.log(JSON.stringify(result, null, 2));
+        else {
+          console.log(`Created the BranchLift demo at ${demoRepo.root}.`);
+          console.log(`Next: cd ${JSON.stringify(demoRepo.root)} && ${result.next}`);
+        }
+        return 0;
+      }
+      const result = await quickstartRepository(demoRepo, { branch: "agent/demo", start: true, trustPolicy: true });
+      if (json) console.log(JSON.stringify(result, null, 2));
+      else printQuickstart(result);
+      return 0;
+    }
     const repo = await discoverRepo();
     switch (command) {
       case "mcp": {
@@ -124,6 +162,140 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           if (!dryRun) console.log("Agent hooks will attach or reuse the current branch backend on session start.");
         }
         return 0;
+      }
+      case "quickstart": {
+        const snapshot = takeOption(args, "--snapshot");
+        const noStart = takeFlag(args, "--no-start");
+        const trustPolicy = takeFlag(args, "--trust-policy");
+        const json = takeFlag(args, "--json");
+        const branch = args.shift() ?? "agent/demo";
+        assertNoArgs(args);
+        const result = await quickstartRepository(repo, {
+          branch,
+          ...(snapshot === undefined ? {} : { snapshot }),
+          start: !noStart,
+          trustPolicy,
+        });
+        if (json) console.log(JSON.stringify(result, null, 2));
+        else printQuickstart(result);
+        return 0;
+      }
+      case "task": {
+        const action = args.shift() ?? "list";
+        const json = takeFlag(args, "--json");
+        if (action === "list") {
+          assertNoArgs(args);
+          const tasks = await listWorkspaceTasks(repo);
+          if (json) console.log(JSON.stringify(tasks, null, 2));
+          else printWorkspaceTasks(tasks);
+          return 0;
+        }
+        if (action === "add") {
+          const prompt = takeOption(args, "--prompt");
+          const branch = takeOption(args, "--branch");
+          const agent = takeOption(args, "--agent");
+          const statusValue = takeOption(args, "--status") ?? "backlog";
+          const title = requirePositional(args, "task title");
+          assertNoArgs(args);
+          if (prompt === undefined) throw new BranchLiftError("task add requires --prompt TEXT.");
+          const task = await createWorkspaceTask(repo, {
+            title,
+            prompt,
+            ...(branch === undefined ? {} : { branch }),
+            ...(agent === undefined ? {} : { agent }),
+            status: parseWorkspaceTaskStatus(statusValue),
+          });
+          if (json) console.log(JSON.stringify(task, null, 2));
+          else console.log(`Created ${task.id}: ${task.title} (${task.status}).`);
+          return 0;
+        }
+        if (action === "move") {
+          const id = requirePositional(args, "task id");
+          const status = parseWorkspaceTaskStatus(requirePositional(args, "task status"));
+          assertNoArgs(args);
+          const task = await moveWorkspaceTask(repo, id, status);
+          if (json) console.log(JSON.stringify(task, null, 2));
+          else console.log(`Moved ${task.title} to ${task.status}.`);
+          return 0;
+        }
+        if (action === "remove") {
+          const confirm = takeOption(args, "--confirm");
+          const id = requirePositional(args, "task id");
+          assertNoArgs(args);
+          if (confirm !== id) throw new BranchLiftError("task remove requires --confirm with the exact task id.");
+          const task = await deleteWorkspaceTask(repo, id);
+          if (json) console.log(JSON.stringify({ removed: task }, null, 2));
+          else console.log(`Removed workspace task ${task.title}.`);
+          return 0;
+        }
+        throw new BranchLiftError("Usage: branchlift task list|add|move|remove");
+      }
+      case "team": {
+        const subject = args.shift();
+        const action = args.shift();
+        const json = takeFlag(args, "--json");
+        if (subject === "registry") {
+          const directory = takeOption(args, "--directory") ?? process.env.BRANCHLIFT_TEAM_REGISTRY;
+          if (directory === undefined || directory.trim() === "") {
+            throw new BranchLiftError("team registry requires --directory PATH or BRANCHLIFT_TEAM_REGISTRY.");
+          }
+          if (action === "publish") {
+            assertNoArgs(args);
+            const record = await publishTeamRegistry(repo, directory);
+            if (json) console.log(JSON.stringify(record, null, 2));
+            else console.log(`Published ${record.environments.length} environment(s), ${record.snapshots.length} snapshot(s), and ${record.tasks.length} task(s) for ${record.node.hostname}.`);
+            return 0;
+          }
+          if (action === "list") {
+            const all = takeFlag(args, "--all");
+            assertNoArgs(args);
+            const records = await listTeamRegistry(directory, all ? undefined : repo.key);
+            if (json) console.log(JSON.stringify(records, null, 2));
+            else if (records.length === 0) console.log("No shared registry nodes found.");
+            else {
+              console.log("UPDATED\tREPOSITORY\tNODE\tENVIRONMENTS\tSNAPSHOTS\tTASKS");
+              for (const record of records) console.log(`${record.updatedAt}\t${record.repository.name}\t${record.node.hostname}\t${record.environments.length}\t${record.snapshots.length}\t${record.tasks.length}`);
+            }
+            return 0;
+          }
+          throw new BranchLiftError("Usage: branchlift team registry publish|list --directory PATH");
+        }
+        if (subject !== "token") throw new BranchLiftError("Usage: branchlift team token create|list|revoke or team registry publish|list");
+        if (action === "create") {
+          const roleValue = takeOption(args, "--role") ?? "viewer";
+          const label = requirePositional(args, "token label");
+          assertNoArgs(args);
+          const created = await createTeamToken(repo, label, parseTeamRole(roleValue));
+          if (json) console.log(JSON.stringify(created, null, 2));
+          else {
+            console.log(`Created ${created.definition.role} token ${created.definition.id} (${created.definition.label}).`);
+            console.log(`Token: ${created.token}`);
+            console.log("Store it now: BranchLift only persists its SHA-256 digest.");
+          }
+          return 0;
+        }
+        if (action === "list") {
+          assertNoArgs(args);
+          const tokens = await listTeamTokens(repo);
+          if (json) console.log(JSON.stringify(tokens, null, 2));
+          else if (tokens.length === 0) console.log("No team-access tokens for this repository.");
+          else {
+            console.log("ROLE\tLABEL\tID\tCREATED");
+            for (const token of tokens) console.log(`${token.role}\t${token.label}\t${token.id}\t${token.createdAt}`);
+          }
+          return 0;
+        }
+        if (action === "revoke") {
+          const confirm = takeOption(args, "--confirm");
+          const id = requirePositional(args, "token id");
+          assertNoArgs(args);
+          if (confirm !== id) throw new BranchLiftError("team token revoke requires --confirm with the exact token id.");
+          await revokeTeamToken(repo, id);
+          if (json) console.log(JSON.stringify({ revoked: id }, null, 2));
+          else console.log(`Revoked team token ${id}.`);
+          return 0;
+        }
+        throw new BranchLiftError("Usage: branchlift team token create|list|revoke");
       }
       case "hook": {
         const action = args.shift();
@@ -214,13 +386,14 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       case "ui": {
         const portValue = takeOption(args, "--port");
         const noOpen = takeFlag(args, "--no-open");
+        const teamAccess = takeFlag(args, "--team-access");
         assertNoArgs(args);
         const port = portValue === undefined ? undefined : Number.parseInt(portValue, 10);
         if (port !== undefined && (!Number.isInteger(port) || port < 0 || port > 65535)) {
           throw new BranchLiftError("--port must be an integer between 0 and 65535.");
         }
         const config = await loadConfig(repo);
-        await runUiServer(repo, config, { ...(port === undefined ? {} : { port }), open: !noOpen });
+        await runUiServer(repo, config, { ...(port === undefined ? {} : { port }), open: !noOpen, teamAccess });
         return 0;
       }
       case "remote": {
@@ -1026,6 +1199,26 @@ function printInstances(instances: InstanceMetadata[]): void {
   }
 }
 
+function printWorkspaceTasks(tasks: WorkspaceTask[]): void {
+  if (tasks.length === 0) {
+    console.log("No workspace tasks for this repository.");
+    return;
+  }
+  console.log("STATUS\tTITLE\tBRANCH\tAGENT\tID");
+  for (const task of tasks) {
+    console.log(`${task.status}\t${task.title}\t${task.branch ?? "-"}\t${task.agent ?? "-"}\t${task.id}`);
+  }
+}
+
+function printQuickstart(result: Awaited<ReturnType<typeof quickstartRepository>>): void {
+  console.log(`BranchLift environment ready: ${result.instance.branch}`);
+  console.log(`Repository: ${result.repository}`);
+  console.log(`Configuration: ${result.configCreated ? "created" : "reused"}`);
+  console.log(`Snapshot ${result.snapshot.name}: ${result.snapshotCreated ? "created" : "reused"}`);
+  console.log(`Instance: ${result.instanceCreated ? "created" : "reused"} (${result.instance.status})`);
+  console.log("Next: branchlift ui");
+}
+
 function printPreviews(previews: Awaited<ReturnType<typeof previewInstances>>): void {
   if (previews.length === 0) {
     console.log("No BranchLift instances for this repository.");
@@ -1227,11 +1420,22 @@ function printHelp(): void {
   console.log(`BranchLift ${version} — stateful backend environments for parallel coding agents
 
 Usage:
+  branchlift demo [--directory PATH] [--no-run] [--json]
+  branchlift quickstart [BRANCH] [--snapshot NAME] [--no-start] [--trust-policy] [--json]
+  branchlift platform [--json]
   branchlift init [--compose FILE]... [--dry-run] [--json]
   branchlift inspect [--json]
   branchlift security inspect [--json]
   branchlift security trust|revoke [--json]
-  branchlift ui [--port PORT] [--no-open]
+  branchlift ui [--port PORT] [--no-open] [--team-access]
+  branchlift task list [--json]
+  branchlift task add TITLE --prompt TEXT [--branch BRANCH] [--agent AGENT] [--status backlog|ready|running|review|done]
+  branchlift task move ID backlog|ready|running|review|done
+  branchlift task remove ID --confirm ID
+  branchlift team token create LABEL [--role viewer|operator|admin]
+  branchlift team token list [--json]
+  branchlift team token revoke ID --confirm ID
+  branchlift team registry publish|list --directory PATH [--json]
   branchlift remote add NAME HOST --repo REMOTE_PATH [--user USER] [--port PORT] [--identity FILE] [--binary PATH]
   branchlift remote sync NAME [--snapshot NAME]
   branchlift remote snapshot push NAME SNAPSHOT
@@ -1285,6 +1489,9 @@ Usage:
   branchlift mcp
 
 Examples:
+  branchlift demo
+  branchlift quickstart agent/auth --trust-policy
+  branchlift task add "Fix auth race" --prompt "Reproduce, fix, test" --branch agent/auth --agent codex
   branchlift snapshot dev
   branchlift spawn fix-auth -- codex
   branchlift spawn billing -- claude

@@ -40,6 +40,19 @@ jobs:
       - run: docker pull alpine:3.22
       - run: npm run test:e2e
 
+  mongo-kafka-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: docker compose version
+      - run: npm run test:e2e:mongo-kafka
+
   compatibility:
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -11,6 +11,7 @@ import {
   composeUp,
   copyServicePathToHost,
   copySourceServicePathToHost,
+  exportNativeVolumes,
   removeDockerVolumes,
   normalizeRuntimeStateOwnership,
   publishedPorts,
@@ -271,10 +272,20 @@ async function commitSnapshotFromInstanceUnlocked(
   await writeJsonAtomic(join(staging, "metadata.json"), metadata);
   const wasRunning = instance.status === "running";
   const runtime = runtimeForInstance(instance);
+  const nativeSources = new Set(Object.keys(instance.nativeVolumes ?? {}));
+  const nativeBindings = (instance.managedVolumes ?? inspection.volumes)
+    .filter((volume) => nativeSources.has(volume.source));
+  const hostBindings = (instance.managedVolumes ?? inspection.volumes)
+    .filter((volume) => !nativeSources.has(volume.source));
   let sourceRestored = !wasRunning;
   try {
     if (wasRunning) {
-      await normalizeRuntimeStateOwnership(runtime, instance.managedVolumes ?? inspection.volumes, instance.volumeRoot);
+      await normalizeRuntimeStateOwnership(runtime, hostBindings, instance.volumeRoot);
+      await composeDownBestEffort(runtime);
+    }
+    if (nativeBindings.length > 0) {
+      await assertDockerReady();
+      await exportNativeVolumes(runtime, nativeBindings, instance.volumeRoot);
       await composeDownBestEffort(runtime);
     }
     const strategies = await Promise.all(metadata.volumeNames.map(async (volume) => {
@@ -300,6 +311,7 @@ async function commitSnapshotFromInstanceUnlocked(
     await rename(staging, finalPath);
     return { metadata, path: finalPath };
   } catch (error) {
+    if (nativeBindings.length > 0) await composeDownBestEffort(runtime);
     let restoreError: unknown;
     if (wasRunning && !sourceRestored) {
       try {
@@ -336,7 +348,14 @@ async function restoreCommittedInstance(
   instance: InstanceMetadata,
   runtime: ReturnType<typeof runtimeForInstance>,
 ): Promise<void> {
-  await composeUp(runtime, config.snapshot.healthTimeoutSeconds, true, inspection.volumes, instance.volumeRoot);
+  const nativeSources = new Set(Object.keys(instance.nativeVolumes ?? {}));
+  await composeUp(
+    runtime,
+    config.snapshot.healthTimeoutSeconds,
+    true,
+    inspection.volumes.filter((volume) => !nativeSources.has(volume.source)),
+    instance.volumeRoot,
+  );
   instance.ports = await publishedPorts(runtime, inspection);
   instance.status = "running";
   delete instance.error;

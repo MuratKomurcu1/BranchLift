@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse } from "yaml";
 import { BranchLiftError } from "./errors.js";
+import { containerCli } from "./container.js";
 import { pathExists, safeSlug } from "./paths.js";
 import { runCommand } from "./process.js";
 import type { BindMount, ComposeInspection, PortBinding, VolumeBinding } from "./types.js";
@@ -72,6 +73,8 @@ export async function inspectCompose(input: string | string[]): Promise<ComposeI
   const postgresServices: string[] = [];
   const postgresDataDirectories: Record<string, string> = {};
   const mysqlServices: string[] = [];
+  const mongodbServices: string[] = [];
+  const kafkaServices: string[] = [];
   const serviceCommands: Record<string, string | string[]> = {};
 
   for (const [serviceName, rawService] of Object.entries(serviceMap)) {
@@ -92,6 +95,8 @@ export async function inspectCompose(input: string | string[]): Promise<ComposeI
       if (pgdata !== undefined && pgdata !== "") postgresDataDirectories[serviceName] = pgdata;
     }
     if (/(?:^|[\/_-])mysql(?::|$|[\/_-])/i.test(`/${image}`)) mysqlServices.push(serviceName);
+    if (/(?:^|[\/_-])mongo(?:db)?(?::|$|[\/_-])/i.test(`/${image}`)) mongodbServices.push(serviceName);
+    if (/(?:^|[\/_-])(?:kafka|redpanda)(?::|$|[\/_-])/i.test(`/${image}`)) kafkaServices.push(serviceName);
 
     if (typeof rawService.container_name === "string") {
       blockers.push(`Service ${serviceName} sets container_name; fixed names collide across worktrees.`);
@@ -156,6 +161,8 @@ export async function inspectCompose(input: string | string[]): Promise<ComposeI
     postgresServices: postgresServices.sort(),
     postgresDataDirectories,
     mysqlServices: mysqlServices.sort(),
+    mongodbServices: mongodbServices.sort(),
+    kafkaServices: kafkaServices.sort(),
     serviceCommands,
     volumes,
     bindMounts,
@@ -181,7 +188,7 @@ async function readMergedComposeDocument(files: string[]): Promise<unknown> {
   args.push("config", "--format", "json");
   let result;
   try {
-    result = await runCommand("docker", args, { cwd: dirname(files[0]!) });
+    result = await runCommand(containerCli(), args, { cwd: dirname(files[0]!) });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new BranchLiftError("Unable to merge the configured Compose files.", detail);
@@ -189,7 +196,7 @@ async function readMergedComposeDocument(files: string[]): Promise<unknown> {
   try {
     return JSON.parse(result.stdout) as unknown;
   } catch {
-    throw new BranchLiftError("Docker Compose returned an invalid merged project model.", result.stderr.trim());
+    throw new BranchLiftError("The Compose CLI returned an invalid merged project model.", result.stderr.trim());
   }
 }
 

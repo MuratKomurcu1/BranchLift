@@ -16,8 +16,10 @@ import { sandboxPosture } from "./sandbox.js";
 import { inspectSecrets } from "./secrets.js";
 import { commitSnapshotFromInstance } from "./snapshot.js";
 import { listSnapshots } from "./state.js";
-import type { BranchLiftConfig, RepoInfo } from "./types.js";
+import { authenticateTeamToken, teamRoleAllows } from "./team.js";
+import type { BranchLiftConfig, RepoInfo, TeamRole } from "./types.js";
 import { version } from "./version.js";
+import { createWorkspaceTask, deleteWorkspaceTask, inspectWorkspaceDiff, listWorkspaceTasks, moveWorkspaceTask, parseWorkspaceTaskStatus } from "./workspace.js";
 
 const maximumBodyBytes = 64 * 1024;
 
@@ -25,6 +27,7 @@ export interface UiServerOptions {
   host?: "127.0.0.1" | "::1";
   port?: number;
   token?: string;
+  teamAccess?: boolean;
 }
 
 export interface UiServerHandle {
@@ -41,6 +44,7 @@ interface UiRuntime {
   config: BranchLiftConfig;
   token: string;
   origin: string;
+  teamAccess: boolean;
 }
 
 export async function startUiServer(
@@ -56,7 +60,7 @@ export async function startUiServer(
   const port = options.port ?? defaults.port;
   const token = options.token ?? randomBytes(32).toString("base64url");
   assertUiToken(token);
-  const runtime: UiRuntime = { repo, config, token, origin: "" };
+  const runtime: UiRuntime = { repo, config, token, origin: "", teamAccess: options.teamAccess === true };
   const server = createServer((request, response) => {
     void handleRequest(runtime, request, response).catch((error: unknown) => {
       if (response.headersSent) {
@@ -112,6 +116,7 @@ export async function runUiServer(
   const handle = await startUiServer(repo, config, options);
   console.log(`BranchLift control plane: ${handle.url}`);
   console.log("The session token is kept in the URL fragment and is never sent in HTTP logs.");
+  if (options.teamAccess === true) console.log("Repository-scoped team tokens are enabled for this UI process.");
   if (options.open !== false) await openBrowserBestEffort(handle.url);
   await new Promise<void>((resolve) => {
     const stop = () => {
@@ -132,12 +137,13 @@ async function handleRequest(runtime: UiRuntime, request: IncomingMessage, respo
   if (method === "GET" && url.pathname === "/app.css") return sendText(response, 200, "text/css; charset=utf-8", css);
   if (method === "GET" && url.pathname === "/app.js") return sendText(response, 200, "text/javascript; charset=utf-8", javascript);
   if (!url.pathname.startsWith("/api/")) return sendJson(response, 404, { error: "Not found" });
-  if (!authorized(runtime, request)) return sendJson(response, 401, { error: "Unauthorized" });
+  const role = await authorizationRole(runtime, request);
+  if (role === undefined) return sendJson(response, 401, { error: "Unauthorized" });
   if (!sameOrigin(runtime, request)) return sendJson(response, 403, { error: "Origin rejected" });
 
   if (method === "GET" && url.pathname === "/api/state") {
     const currentConfig = await loadConfig(runtime.repo).catch(() => runtime.config);
-    return sendJson(response, 200, await dashboardState(runtime.repo, currentConfig));
+    return sendJson(response, 200, await dashboardState(runtime.repo, currentConfig, role, runtime.teamAccess));
   }
   if (method === "GET" && url.pathname === "/api/logs") {
     const branch = requiredQuery(url, "branch");
@@ -156,9 +162,33 @@ async function handleRequest(runtime: UiRuntime, request: IncomingMessage, respo
   if (method === "GET" && url.pathname === "/api/events/stream") {
     return await streamEvents(runtime.repo, request, response);
   }
+  if (method === "GET" && url.pathname === "/api/diff") {
+    return sendJson(response, 200, await inspectWorkspaceDiff(runtime.repo, requiredQuery(url, "branch")));
+  }
   if (method === "POST" && url.pathname.startsWith("/api/actions/")) {
     const action = url.pathname.slice("/api/actions/".length);
     const body = await readJsonBody(request);
+    const requiredRole = requiredRoleForAction(action, body);
+    if (!teamRoleAllows(role, requiredRole)) return sendJson(response, 403, { error: `${requiredRole} role required` });
+    if (action === "task-create") {
+      const task = await createWorkspaceTask(runtime.repo, {
+        title: stringField(body, "title"),
+        prompt: stringField(body, "prompt", 20_000),
+        ...(typeof body.branch === "string" && body.branch.trim() !== "" ? { branch: body.branch } : {}),
+        ...(typeof body.agent === "string" && body.agent.trim() !== "" ? { agent: body.agent } : {}),
+        status: parseWorkspaceTaskStatus(typeof body.status === "string" ? body.status : "backlog"),
+      });
+      return sendJson(response, 200, { ok: true, task });
+    }
+    if (action === "task-move") {
+      const task = await moveWorkspaceTask(runtime.repo, stringField(body, "id"), parseWorkspaceTaskStatus(stringField(body, "status")));
+      return sendJson(response, 200, { ok: true, task });
+    }
+    if (action === "task-delete") {
+      const id = stringField(body, "id");
+      if (body.confirm !== id) return sendJson(response, 400, { error: "Task deletion confirmation must match the id." });
+      return sendJson(response, 200, { ok: true, task: await deleteWorkspaceTask(runtime.repo, id) });
+    }
     if (action === "remote-add") {
       const port = body.port === undefined || body.port === "" ? undefined : numberField(body, "port");
       const remote = await addRemote({
@@ -363,14 +393,15 @@ async function handleRequest(runtime: UiRuntime, request: IncomingMessage, respo
   return sendJson(response, 404, { error: "Not found" });
 }
 
-async function dashboardState(repo: RepoInfo, config: BranchLiftConfig): Promise<Record<string, unknown>> {
-  const [instances, snapshots, events, secrets, remotes, policy] = await Promise.all([
+async function dashboardState(repo: RepoInfo, config: BranchLiftConfig, role: TeamRole, teamAccess: boolean): Promise<Record<string, unknown>> {
+  const [instances, snapshots, events, secrets, remotes, policy, tasks] = await Promise.all([
     previewInstances(repo),
     listSnapshots(repo),
     listEvents(repo, 100),
     inspectSecrets(repo, config),
     listRemotes(),
     inspectPolicyTrust(repo, config),
+    listWorkspaceTasks(repo),
   ]);
   return {
     version: 1,
@@ -393,6 +424,8 @@ async function dashboardState(repo: RepoInfo, config: BranchLiftConfig): Promise
     })),
     security: sandboxPosture(config),
     policy,
+    tasks,
+    access: { role, teamAccess },
   };
 }
 
@@ -440,12 +473,25 @@ async function streamEvents(repo: RepoInfo, request: IncomingMessage, response: 
   });
 }
 
-function authorized(runtime: UiRuntime, request: IncomingMessage): boolean {
+async function authorizationRole(runtime: UiRuntime, request: IncomingMessage): Promise<TeamRole | undefined> {
   const header = request.headers.authorization;
-  if (header === undefined || Array.isArray(header) || !header.startsWith("Bearer ")) return false;
-  const supplied = Buffer.from(header.slice("Bearer ".length));
+  if (header === undefined || Array.isArray(header) || !header.startsWith("Bearer ")) return undefined;
+  const raw = header.slice("Bearer ".length);
+  const supplied = Buffer.from(raw);
   const expected = Buffer.from(runtime.token);
-  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+  if (supplied.length === expected.length && timingSafeEqual(supplied, expected)) return "admin";
+  return runtime.teamAccess ? await authenticateTeamToken(runtime.repo, raw) : undefined;
+}
+
+function requiredRoleForAction(action: string, body: Record<string, unknown>): TeamRole {
+  if (action === "snapshot-diff") return "viewer";
+  if (action === "task-delete" || action === "remote-add" || action === "remote-setup" || action === "remote-remove"
+    || action === "reset" || action === "destroy") return "admin";
+  if (action === "remote-operate") {
+    const operation = body.operation;
+    if (operation === "reset" || operation === "destroy" || operation === "cache-prune" || operation === "trust") return "admin";
+  }
+  return "operator";
 }
 
 function sameOrigin(runtime: UiRuntime, request: IncomingMessage): boolean {
@@ -469,10 +515,10 @@ async function readJsonBody(request: IncomingMessage): Promise<Record<string, un
   return value as Record<string, unknown>;
 }
 
-function stringField(value: Record<string, unknown>, key: string): string {
+function stringField(value: Record<string, unknown>, key: string, maximum = 300): string {
   const field = value[key];
-  if (typeof field !== "string" || field.trim() === "" || field.length > 300) {
-    throw new BranchLiftError(`${key} must be a non-empty string no longer than 300 characters.`);
+  if (typeof field !== "string" || field.trim() === "" || field.length > maximum) {
+    throw new BranchLiftError(`${key} must be a non-empty string no longer than ${maximum} characters.`);
   }
   return field;
 }
@@ -546,13 +592,14 @@ const html = String.raw`<!doctype html>
       <nav class="navigation">
         <button class="nav-item active" data-view="overview"><span class="nav-icon">⌂</span><span>Overview</span></button>
         <button class="nav-item" data-view="environments"><span class="nav-icon">⌘</span><span>Environments</span><span id="nav-instance-count" class="nav-count">0</span></button>
+        <button class="nav-item" data-view="workspace"><span class="nav-icon">☷</span><span>Workspace</span><span id="nav-task-count" class="nav-count">0</span></button>
         <button class="nav-item" data-view="state"><span class="nav-icon">◫</span><span>State</span></button>
         <button class="nav-item" data-view="security"><span class="nav-icon">◇</span><span>Security</span></button>
         <button class="nav-item" data-view="remotes"><span class="nav-icon">↗</span><span>Remotes</span></button>
         <button class="nav-item" data-view="activity"><span class="nav-icon">≋</span><span>Activity</span></button>
       </nav>
       <div class="sidebar-footer">
-        <div class="sidebar-status"><span class="status-orb"></span><div><strong>Local only</strong><small>Token protected · loopback</small></div></div>
+        <div class="sidebar-status"><span class="status-orb"></span><div><strong id="access-title">Local admin</strong><small id="access-copy">Token protected · loopback</small></div></div>
         <button id="open-command-sidebar" class="shortcut-row"><span>Quick actions</span><kbd>⌘ K</kbd></button>
       </div>
     </aside>
@@ -603,6 +650,12 @@ const html = String.raw`<!doctype html>
             <div class="panel-head filter-head"><div><h2>Branch environments</h2><span id="environment-summary" class="muted">Loading…</span></div><div class="search-wrap"><span>⌕</span><input id="instance-filter" class="filter-input" type="search" placeholder="Filter environments (press /)" aria-label="Filter environments" autocomplete="off"></div></div>
             <div id="instances" class="instance-list skeleton-block"></div>
           </article>
+        </section>
+
+        <section class="workspace-view" data-view-panel="workspace">
+          <div class="section-heading"><div><p class="eyebrow">AGENT WORKSPACE</p><h1>From prompt to reviewed diff</h1><p>Keep agent instructions, branch ownership, execution state, and bounded Git review beside the backend environment.</p></div><button class="action primary" data-open-task>＋ New task</button></div>
+          <article class="workspace-banner panel"><div><span class="capability-icon">☷</span><div><strong>Repository-local orchestration</strong><p>Prompts and task metadata stay in BranchLift's private state. Diff review is read-only and limited to registered worktrees.</p></div></div><span id="workspace-role" class="feature-badge">admin</span></article>
+          <section id="task-board" class="task-board skeleton-block" aria-label="Agent task board"></section>
         </section>
 
         <section class="workspace-view" data-view-panel="state">
@@ -694,12 +747,25 @@ const html = String.raw`<!doctype html>
     </form>
   </dialog>
 
+  <dialog id="task-dialog" class="sheet-dialog task-dialog">
+    <div class="dialog-head"><div><p class="eyebrow">NEW AGENT TASK</p><h2>Define work before execution</h2></div><button class="icon-button dialog-close" data-close-dialog="task-dialog" aria-label="Close">×</button></div>
+    <p class="dialog-copy">The prompt is stored privately and can be copied into Codex, Claude, Cursor, or your own agent.</p>
+    <form id="task-form" class="stack-form">
+      <label class="field"><span>Task title</span><input name="title" placeholder="Harden refresh-token rotation" maxlength="120" required></label>
+      <label class="field"><span>Agent prompt</span><textarea name="prompt" placeholder="Inspect the current flow, implement the smallest safe fix, add regression tests, then summarize the diff…" maxlength="20000" required></textarea></label>
+      <div class="two-up nested-fields"><label class="field"><span>Environment branch <em>optional</em></span><input name="branch" placeholder="agent/auth-rotation"></label><label class="field"><span>Agent <em>optional</em></span><input name="agent" placeholder="codex"></label></div>
+      <label class="field"><span>Initial lane</span><select name="status"><option value="backlog">Backlog</option><option value="ready">Ready</option><option value="running">Running</option><option value="review">Review</option><option value="done">Done</option></select></label>
+      <div class="dialog-actions"><button class="action secondary" type="button" data-close-dialog="task-dialog">Cancel</button><button class="action primary" type="submit">Create task</button></div>
+    </form>
+  </dialog>
+
   <dialog id="command-dialog" class="command-dialog">
     <div class="command-search"><span>⌕</span><input id="command-search" type="search" placeholder="Search actions and sections…" aria-label="Search quick actions" autocomplete="off"><kbd>esc</kbd></div>
     <div id="command-list" class="command-list">
       <button data-command="spawn"><span class="command-icon">＋</span><span><strong>New environment</strong><small>Create isolated state for a branch</small></span><kbd>↵</kbd></button>
       <button data-command="refresh"><span class="command-icon">↻</span><span><strong>Refresh state</strong><small>Reload the local control plane</small></span></button>
       <button data-command="environments"><span class="command-icon">⌘</span><span><strong>Open environments</strong><small>Start, stop, reset, or inspect logs</small></span></button>
+      <button data-command="workspace"><span class="command-icon">☷</span><span><strong>Open agent workspace</strong><small>Plan prompts and review branch diffs</small></span></button>
       <button data-command="state"><span class="command-icon">◫</span><span><strong>Open state lineage</strong><small>Commit and compare snapshots</small></span></button>
       <button data-command="security"><span class="command-icon">◇</span><span><strong>Open security</strong><small>Inspect the effective sandbox posture</small></span></button>
       <button data-command="remotes"><span class="command-icon">↗</span><span><strong>Open remotes</strong><small>Sync, tunnel, and build on your machines</small></span></button>
@@ -825,20 +891,24 @@ kbd { display: inline-flex; align-items: center; justify-content: center; min-wi
 .pill, .feature-badge, .live-label, .security-score { display: inline-flex; align-items: center; gap: 6px; border-radius: 99px; padding: 5px 8px; font-size: 9px; font-weight: 650; white-space: nowrap; }.pill { color: var(--green); background: var(--green-soft); }.pill.warning { color: var(--amber); background: var(--amber-soft); }.pill.error { color: var(--red); background: var(--red-soft); }.pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent); }.feature-badge { color: var(--purple); background: color-mix(in srgb, var(--purple) 12%, transparent); text-transform: uppercase; letter-spacing: .05em; }.live-label { color: var(--green); background: var(--green-soft); }.security-score { color: var(--green); background: var(--green-soft); }
 .instance-list { display: grid; gap: 9px; }.instance { border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--panel-solid) 56%, transparent); padding: 14px; transition: border-color .15s ease, transform .15s ease; }.instance:hover { border-color: var(--line-strong); transform: translateY(-1px); }.instance-top { display: flex; justify-content: space-between; gap: 14px; }.instance-title { display: flex; align-items: center; gap: 9px; }.branch-icon { display: grid; place-items: center; width: 29px; height: 29px; flex: 0 0 auto; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 13px; }.instance h3 { margin: 0 0 3px; font-size: 12px; }.instance-meta { max-width: 670px; color: var(--muted); font-size: 9px; overflow-wrap: anywhere; }.services,.endpoints,.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }.service { padding: 4px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-soft); color: var(--muted); font-size: 9px; }.service.running { color: var(--green); }.service.exited,.service.dead { color: var(--red); }.endpoint { display: inline-flex; cursor: pointer; border-radius: 6px; padding: 4px 6px; background: var(--accent-soft); color: var(--accent); font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 8px; transition: background .15s ease; }.endpoint:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .compact-list { display: grid; gap: 1px; }.compact-instance { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; padding: 10px 2px; border-bottom: 1px solid var(--line); }.compact-instance:last-child { border-bottom: 0; }.compact-instance strong,.compact-instance small { display: block; }.compact-instance strong { font-size: 10px; }.compact-instance small { max-width: 460px; margin-top: 3px; color: var(--muted); font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.workspace-banner { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 13px; }.workspace-banner > div { display: flex; align-items: center; gap: 12px; }.workspace-banner strong { font-size: 11px; }.workspace-banner p { margin: 3px 0 0; color: var(--muted); font-size: 9px; line-height: 1.45; }.task-board { min-height: 330px; display: grid; grid-template-columns: repeat(5, minmax(205px,1fr)); gap: 10px; overflow-x: auto; padding-bottom: 5px; }.task-column { min-height: 320px; border: 1px solid var(--line); border-radius: 13px; padding: 10px; background: color-mix(in srgb, var(--panel) 67%, transparent); }.task-column-head { display: flex; align-items: center; justify-content: space-between; padding: 2px 3px 10px; }.task-column-head strong { font-size: 10px; }.task-column-head span { min-width: 20px; border-radius: 99px; padding: 3px 6px; background: var(--panel-soft); color: var(--muted); text-align: center; font-size: 8px; }.task-stack { display: grid; gap: 8px; }.task-card { border: 1px solid var(--line); border-radius: 10px; padding: 11px; background: var(--panel-solid); box-shadow: 0 2px 8px rgba(18,24,38,.045); }.task-card h3 { margin: 0; font-size: 10px; line-height: 1.35; }.task-card p { display: -webkit-box; margin: 7px 0; overflow: hidden; color: var(--muted); font-size: 9px; line-height: 1.45; -webkit-line-clamp: 4; -webkit-box-orient: vertical; }.task-meta { display: flex; flex-wrap: wrap; gap: 5px; }.task-meta span { border-radius: 5px; padding: 3px 5px; background: var(--panel-soft); color: var(--text-secondary); font-size: 8px; }.task-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 9px; }.task-actions button { min-height: 25px; padding: 0 7px; font-size: 8px; }.task-column-empty { padding: 22px 6px; color: var(--muted); text-align: center; font-size: 9px; }
 .empty { display: grid; justify-items: center; gap: 7px; padding: 32px 14px; text-align: center; }.empty-icon { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-size: 18px; }.empty strong { font-size: 12px; }.empty p { max-width: 430px; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.5; }.empty-actions { display: flex; gap: 7px; margin-top: 5px; }
 .table-wrap { width: 100%; overflow: auto; }.table { width: 100%; border-collapse: collapse; }.table th,.table td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; font-size: 9px; white-space: nowrap; }.table th { color: var(--muted); font-size: 8px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }.table td:first-child strong { font-size: 10px; }.table tbody tr { transition: background .15s ease; }.table tbody tr:hover { background: rgba(127,130,140,.055); }.table .actions { margin: 0; justify-content: flex-end; }
 .timeline { max-height: 460px; overflow: auto; padding: 2px 3px 0 5px; }.timeline.compact { max-height: 288px; }.event { position: relative; margin-left: 4px; padding: 0 0 14px 17px; border-left: 1px solid var(--line-strong); }.event:last-child { padding-bottom: 1px; }.event:before { content: ""; position: absolute; left: -4px; top: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }.event.error:before { background: var(--red); box-shadow: 0 0 0 3px var(--red-soft); }.event.warning:before { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }.event strong { font-size: 10px; }.event p { margin: 3px 0; color: var(--muted); font-size: 9px; line-height: 1.4; }.event time { color: var(--muted); font-size: 8px; }.activity-timeline { max-height: none; }
 .filter-head > div:first-child { min-width: 0; }.search-wrap { width: min(260px, 42%); display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 8px; background: var(--field); padding: 0 9px; color: var(--muted); }.filter-input { width: 100%; height: 31px; margin: 0; padding: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 10px; }.filter-input::placeholder,input::placeholder { color: var(--muted); opacity: .75; }
 .field { display: grid; gap: 5px; min-width: 0; }.field > span { color: var(--text-secondary); font-size: 9px; font-weight: 600; }.field em { color: var(--muted); font-size: 8px; font-style: normal; font-weight: 400; }.field small { color: var(--muted); font-size: 8px; line-height: 1.4; }.field input,.field select,.command-search input { width: 100%; height: 34px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; outline: 0; background: var(--field); color: var(--text); font-size: 10px; }.field input:focus,.field select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }.stack-form { display: grid; gap: 10px; margin-top: 15px; }.two-up,.remote-operation-form { grid-template-columns: repeat(2, minmax(0,1fr)); }.nested-fields { display: grid; gap: 10px; margin-top: 10px; }.full-span { grid-column: 1 / -1; }.remote-operation-form { display: grid; gap: 10px; margin-top: 15px; align-items: end; }.check-field { min-height: 34px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; background: var(--field); color: var(--text-secondary); font-size: 9px; }.check-field input,.check-card input { accent-color: var(--accent); }.form-divider { display: flex; align-items: center; gap: 8px; margin: 17px 0 4px; color: var(--muted); font-size: 8px; text-transform: uppercase; }.form-divider:before,.form-divider:after { content: ""; height: 1px; flex: 1; background: var(--line); }.action-panel > .muted { margin: 5px 0 0; line-height: 1.5; }.advanced { margin: 0; padding: 0; border: 0; }.advanced summary { cursor: pointer; color: var(--accent); font-size: 9px; font-weight: 600; }
+.field textarea { width: 100%; min-height: 125px; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; outline: 0; background: var(--field); color: var(--text); font: 10px/1.5 inherit; }.field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .security-row { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 10px 1px; border-bottom: 1px solid var(--line); font-size: 10px; }.security-row:last-child { border-bottom: 0; }.security-row span { color: var(--muted); }.security-row strong { text-align: right; }.shield { display: grid; place-items: center; width: 31px; height: 31px; border-radius: 9px; background: var(--green-soft); color: var(--green); font-size: 17px; }.secret-summary { margin: 0; }.security-callout { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px; margin-top: 13px; }.callout-icon { display: grid; place-items: center; width: 35px; height: 35px; border-radius: 10px; background: var(--green-soft); color: var(--green); font-weight: 800; }.security-callout strong { font-size: 11px; }.security-callout p { margin: 3px 0 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
 dialog { color: var(--text); background: var(--panel-solid); border: 1px solid var(--line-strong); border-radius: 15px; box-shadow: var(--shadow-window); }.sheet-dialog { width: min(480px, calc(100vw - 34px)); padding: 21px; }.dialog-head { margin-bottom: 13px; }.dialog-copy { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.55; }.dialog-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 7px; }.dialog-close { font-size: 19px; }.check-card { display: flex; align-items: flex-start; gap: 10px; border: 1px solid var(--line); border-radius: 10px; padding: 11px; background: var(--field); }.check-card input { margin-top: 2px; }.check-card strong,.check-card small { display: block; }.check-card strong { font-size: 10px; }.check-card small { margin-top: 3px; color: var(--muted); font-size: 8px; }
 dialog::backdrop { background: rgba(9, 11, 16, .46); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }.logs-dialog { width: min(1000px, calc(100vw - 40px)); height: min(720px, calc(100vh - 48px)); padding: 18px; }.logs-dialog pre { height: calc(100% - 51px); overflow: auto; margin: 0; border: 1px solid var(--line); border-radius: 10px; padding: 14px; background: #111318; color: #e8ecf4; font: 10px/1.55 ui-monospace, "SFMono-Regular", Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
 .command-dialog { width: min(580px, calc(100vw - 34px)); padding: 9px; transform: translateY(-10vh); }.command-search { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); padding: 4px 7px 11px; color: var(--muted); }.command-search input { flex: 1; border: 0; background: transparent; font-size: 13px; }.command-list { display: grid; gap: 2px; max-height: 390px; overflow: auto; padding-top: 7px; }.command-list button { display: grid; grid-template-columns: 32px 1fr auto; align-items: center; gap: 10px; width: 100%; border: 0; border-radius: 9px; padding: 9px; background: transparent; text-align: left; cursor: pointer; }.command-list button:hover,.command-list button.selected { background: var(--accent-soft); }.command-list strong,.command-list small { display: block; }.command-list strong { font-size: 10px; }.command-list small { margin-top: 3px; color: var(--muted); font-size: 8px; }.command-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--panel-soft); color: var(--accent); font-size: 14px; }
 #toast { position: fixed; right: 32px; bottom: 31px; z-index: 100; max-width: 420px; padding: 11px 14px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel-solid); box-shadow: var(--shadow-window); color: var(--text); font-size: 10px; opacity: 0; transform: translateY(70px); transition: .22s ease; pointer-events: none; }.desktop-shell.hidden + dialog + dialog + dialog + #toast { display: none; }#toast.show { opacity: 1; transform: none; }
+.desktop-shell.hidden ~ #toast { display: none; }
 .locked { min-height: 100vh; display: grid; place-items: center; padding: 30px; }.locked-card { width: min(440px, 100%); border: 1px solid var(--line); border-radius: 18px; padding: 38px; background: var(--panel); box-shadow: var(--shadow-window); text-align: center; }.locked h1 { margin: 4px 0 8px; font-size: 25px; letter-spacing: -.03em; }.locked p:not(.eyebrow) { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }.locked code { color: var(--accent); }
 .skeleton-block:empty { min-height: 70px; border-radius: 10px; background: linear-gradient(100deg, var(--panel-soft) 20%, rgba(127,130,140,.12) 38%, var(--panel-soft) 55%); background-size: 200% 100%; animation: skeleton 1.25s infinite; }.onboarding.skeleton-block:empty { min-height: 84px; }.instance-list.skeleton-block:empty { min-height: 190px; }@keyframes skeleton { to { background-position-x: -200%; } }
 @media (max-width: 1050px) { .desktop-shell { grid-template-columns: 205px minmax(0,1fr); }.span-7,.span-5,.span-8,.span-4 { grid-column: 1 / -1; }.state-grid,.remote-grid { gap: 13px; }.toolbar-button { display: none; }.onboarding { grid-template-columns: auto 1fr; }.onboarding-actions { grid-column: 1 / -1; padding-left: 70px; }.security-callout { grid-template-columns: auto 1fr; }.security-callout .action { grid-column: 2; justify-self: start; } }
 @media (max-width: 760px) { .desktop-shell { inset: 0; grid-template-columns: 1fr; border: 0; border-radius: 0; }.sidebar { z-index: 20; position: fixed; bottom: 0; left: 0; right: 0; height: 59px; display: block; padding: 5px 6px; border: 1px solid var(--line); border-width: 1px 0 0; background: var(--toolbar); -webkit-backdrop-filter: blur(25px); backdrop-filter: blur(25px); }.window-controls,.brand,.sidebar-footer { display: none; }.navigation { display: grid; grid-template-columns: repeat(6,1fr); gap: 2px; }.nav-item { height: 48px; display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 0; font-size: 8px; text-align: center; }.nav-icon { font-size: 14px; }.nav-count { display: none; }.workspace { padding-bottom: 58px; }.toolbar { padding: 0 12px; }.toolbar-title { display: none; }.toolbar-actions { width: 100%; justify-content: flex-end; }.toolbar-actions .action.primary { margin-left: auto; }.content { padding: 26px 14px 38px; }.hero,.section-heading { align-items: flex-start; flex-direction: column; gap: 12px; }.hero-meta { white-space: normal; flex-wrap: wrap; }.stats { grid-template-columns: repeat(2,1fr); }.capability-strip { grid-template-columns: 1fr; }.capability-strip > div + div { border-left: 0; border-top: 1px solid var(--line); }.filter-head { align-items: stretch; flex-direction: column; }.search-wrap { width: 100%; }.two-up,.remote-operation-form { grid-template-columns: 1fr; }.full-span { grid-column: auto; }.security-callout { grid-template-columns: 1fr; }.security-callout .action { grid-column: auto; }.onboarding { grid-template-columns: 1fr; justify-items: start; }.onboarding-actions { grid-column: auto; padding-left: 0; flex-wrap: wrap; }.progress-ring { width: 46px; height: 46px; }.table th,.table td { padding: 9px 7px; }.toolbar-actions #connection { margin-right: auto; } }
+@media (max-width: 760px) { .navigation { grid-template-columns: repeat(7,1fr); }.task-board { grid-template-columns: repeat(5, minmax(240px, 1fr)); } }
 @media (max-width: 430px) { .stats { grid-template-columns: 1fr; }.toolbar-actions #theme-toggle { display: none; }.toolbar-actions .action.primary { padding: 0 8px; }.instance-top { flex-direction: column; }.empty-actions { flex-direction: column; }.panel { padding: 15px; } }
 @media (prefers-reduced-motion: reduce) { *, *:before, *:after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }`;
 
@@ -871,6 +941,10 @@ const javascript = String.raw`(() => {
     return Math.floor(duration / 86400000) + 'd ago';
   };
   const healthyInstance = instance => instance.status === 'running' && (instance.services || []).every(service => service.state === 'running' && (!service.health || service.health === 'healthy'));
+  const taskStatuses = ['backlog', 'ready', 'running', 'review', 'done'];
+  const taskStatusLabels = { backlog: 'Backlog', ready: 'Ready', running: 'Running', review: 'Review', done: 'Done' };
+  let currentRole = 'viewer';
+  let currentTasks = [];
 
   async function api(path, options = {}) {
     const response = await fetch(path, { ...options, headers: { ...headers, ...(options.headers || {}) } });
@@ -957,6 +1031,31 @@ const javascript = String.raw`(() => {
     byId('overview-instances').innerHTML = data.instances.length ? data.instances.slice(0, 5).map(instance => '<div class="compact-instance"><div><strong>' + esc(instance.branch) + '</strong><small>' + esc(instance.snapshot) + ' · ' + esc((instance.services || []).length) + ' services · ' + esc((instance.endpoints || []).length) + ' endpoints</small></div><span class="pill ' + statusClass(instance.status) + '"><span class="pulse"></span>' + esc(instance.status) + '</span></div>').join('') : emptyMarkup('＋', 'Start with one branch', 'Clone known backend state instead of re-running migrations and seeds.', '<button class="action primary" data-open-spawn>New environment</button>');
   }
 
+  function renderTasks(data) {
+    currentRole = data.access.role;
+    currentTasks = data.tasks;
+    const canOperate = currentRole === 'operator' || currentRole === 'admin';
+    const canAdmin = currentRole === 'admin';
+    byId('nav-task-count').textContent = String(data.tasks.filter(task => task.status !== 'done').length);
+    byId('workspace-role').textContent = currentRole + (data.access.teamAccess ? ' · team access on' : ' · local session');
+    byId('access-title').textContent = currentRole === 'admin' && !data.access.teamAccess ? 'Local admin' : currentRole + ' access';
+    byId('access-copy').textContent = data.access.teamAccess ? 'RBAC token · loopback UI' : 'Token protected · loopback';
+    document.querySelectorAll('[data-open-task]').forEach(button => { button.disabled = !canOperate; button.title = canOperate ? '' : 'Operator role required'; });
+    const card = task => {
+      const index = taskStatuses.indexOf(task.status);
+      const metadata = (task.branch ? '<span>⌘ ' + esc(task.branch) + '</span>' : '') + (task.agent ? '<span>⌾ ' + esc(task.agent) + '</span>' : '') + '<span>' + esc(ago(task.updatedAt)) + '</span>';
+      const previous = index > 0 ? '<button class="action secondary" data-task-action="move" data-status="' + taskStatuses[index - 1] + '"' + (canOperate ? '' : ' disabled') + '>←</button>' : '';
+      const next = index < taskStatuses.length - 1 ? '<button class="action secondary" data-task-action="move" data-status="' + taskStatuses[index + 1] + '"' + (canOperate ? '' : ' disabled') + '>→</button>' : '';
+      const diff = task.branch ? '<button class="action secondary" data-task-action="diff">Diff</button>' : '';
+      return '<article class="task-card" draggable="' + canOperate + '" data-task-id="' + esc(task.id) + '"><h3>' + esc(task.title) + '</h3><p>' + esc(task.prompt) + '</p><div class="task-meta">' + metadata + '</div><div class="task-actions"><button class="action secondary" data-task-action="copy">Copy prompt</button>' + diff + previous + next + '<button class="action danger" data-task-action="delete"' + (canAdmin ? '' : ' disabled') + '>×</button></div></article>';
+    };
+    byId('task-board').classList.remove('skeleton-block');
+    byId('task-board').innerHTML = taskStatuses.map(status => {
+      const tasks = data.tasks.filter(task => task.status === status);
+      return '<section class="task-column" data-task-status="' + status + '"><div class="task-column-head"><strong>' + taskStatusLabels[status] + '</strong><span>' + tasks.length + '</span></div><div class="task-stack">' + (tasks.length ? tasks.map(card).join('') : '<div class="task-column-empty">Drop a task here</div>') + '</div></section>';
+    }).join('');
+  }
+
   function renderSnapshots(data) {
     byId('snapshots').classList.remove('skeleton-block');
     byId('snapshots').innerHTML = data.snapshots.length
@@ -996,11 +1095,11 @@ const javascript = String.raw`(() => {
   function render(data) {
     byId('repo-name').textContent = data.repository.name; byId('repo-root').textContent = data.repository.root;
     byId('toolbar-repo').textContent = data.repository.name; byId('generated').textContent = 'Updated ' + ago(data.generatedAt);
-    renderOnboarding(data); renderStats(data); renderInstances(data); renderSnapshots(data); renderSecurity(data); renderEvents(data); renderRemotes(data);
+    renderOnboarding(data); renderStats(data); renderInstances(data); renderTasks(data); renderSnapshots(data); renderSecurity(data); renderEvents(data); renderRemotes(data);
     const connection = byId('connection'); connection.innerHTML = '<span class="pulse"></span>Live'; connection.className = 'pill';
   }
 
-  const viewNames = { overview: 'Overview', environments: 'Environments', state: 'State', security: 'Security', remotes: 'Remotes', activity: 'Activity' };
+  const viewNames = { overview: 'Overview', environments: 'Environments', workspace: 'Workspace', state: 'State', security: 'Security', remotes: 'Remotes', activity: 'Activity' };
   function setView(view) {
     const selected = viewNames[view] ? view : 'overview';
     document.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === selected));
@@ -1072,9 +1171,49 @@ const javascript = String.raw`(() => {
 
   app.addEventListener('click', event => {
     const spawn = event.target.closest('[data-open-spawn]'); if (spawn) { openDialog('spawn-dialog'); setTimeout(() => byId('spawn-form').elements.branch.focus(), 30); return; }
+    const task = event.target.closest('[data-open-task]'); if (task && !task.disabled) { openDialog('task-dialog'); setTimeout(() => byId('task-form').elements.title.focus(), 30); return; }
     const navigation = event.target.closest('[data-nav]'); if (navigation) { setView(navigation.dataset.nav); return; }
     const copy = event.target.closest('[data-copy]'); if (copy) { copyText(copy.dataset.copy); return; }
     const endpoint = event.target.closest('.endpoint'); if (endpoint) copyText(endpoint.dataset.endpoint || '');
+  });
+
+  async function moveTask(id, status) {
+    await api('/api/actions/task-move', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ id, status }) });
+    await load();
+  }
+
+  byId('task-board').addEventListener('click', async event => {
+    const button = event.target.closest('button[data-task-action]'); if (!button || button.disabled) return;
+    const card = button.closest('[data-task-id]'); const id = card.dataset.taskId; const task = currentTasks.find(entry => entry.id === id);
+    if (!task) return;
+    const action = button.dataset.taskAction; setButtonBusy(button, true, action === 'diff' ? 'Loading…' : 'Working…');
+    try {
+      if (action === 'copy') { await copyText(task.prompt); return; }
+      if (action === 'diff') {
+        const result = await api('/api/diff?branch=' + encodeURIComponent(task.branch));
+        byId('logs-title').textContent = task.branch + ' · Git review';
+        byId('logs-output').textContent = [result.status, result.stat, result.patch].filter(Boolean).join('\n\n') || 'No worktree changes.';
+        openDialog('logs-dialog'); return;
+      }
+      if (action === 'move') { await moveTask(id, button.dataset.status); toast('Moved ' + task.title + ' to ' + taskStatusLabels[button.dataset.status]); return; }
+      if (action === 'delete') {
+        if (!confirm('Delete task ' + task.title + '?')) return;
+        await api('/api/actions/task-delete', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify({ id, confirm: id }) });
+        toast('Task deleted'); await load();
+      }
+    } catch (error) { toast(error.message, true); } finally { setButtonBusy(button, false); }
+  });
+
+  byId('task-board').addEventListener('dragstart', event => {
+    const card = event.target.closest('[data-task-id]'); if (!card || currentRole === 'viewer') return;
+    event.dataTransfer.setData('text/plain', card.dataset.taskId); event.dataTransfer.effectAllowed = 'move';
+  });
+  byId('task-board').addEventListener('dragover', event => { if (event.target.closest('[data-task-status]') && currentRole !== 'viewer') event.preventDefault(); });
+  byId('task-board').addEventListener('drop', async event => {
+    const column = event.target.closest('[data-task-status]'); if (!column || currentRole === 'viewer') return;
+    event.preventDefault(); const id = event.dataTransfer.getData('text/plain'); if (!id) return;
+    try { await moveTask(id, column.dataset.taskStatus); toast('Task moved to ' + taskStatusLabels[column.dataset.taskStatus]); }
+    catch (error) { toast(error.message, true); }
   });
 
   byId('instances').addEventListener('click', async event => {
@@ -1135,6 +1274,15 @@ const javascript = String.raw`(() => {
     try {
       await api('/api/actions/spawn', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(values) });
       toast('Environment ' + values.branch + ' created'); form.reset(); form.elements.start.checked = true; byId('spawn-dialog').close(); setView('environments'); await load();
+    } catch (error) { toast(error.message, true); } finally { setButtonBusy(button, false); }
+  });
+
+  byId('task-form').addEventListener('submit', async event => {
+    event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button[type="submit"]'); const values = Object.fromEntries(new FormData(form).entries());
+    Object.keys(values).forEach(key => { if (values[key] === '') delete values[key]; }); setButtonBusy(button, true, 'Creating task…');
+    try {
+      await api('/api/actions/task-create', { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(values) });
+      toast('Agent task created'); form.reset(); byId('task-dialog').close(); setView('workspace'); await load();
     } catch (error) { toast(error.message, true); } finally { setButtonBusy(button, false); }
   });
 

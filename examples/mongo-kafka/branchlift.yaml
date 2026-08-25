@@ -1,0 +1,24 @@
+version: 1
+compose:
+  files:
+    - compose.yaml
+  statefulServices:
+    - mongodb
+    - kafka
+snapshot:
+  default: dev
+  healthTimeoutSeconds: 240
+  seed:
+    - service: mongodb
+      command:
+        - mongosh
+        - --quiet
+        - --eval
+        - "db.getSiblingDB('app').examples.insertOne({_id: 1, value: 'golden'})"
+    - service: kafka
+      command:
+        - /bin/sh
+        - -ec
+        - /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic examples && printf 'golden\n' | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic examples
+worktree:
+  copyFiles: []

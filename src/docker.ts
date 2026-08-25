@@ -1,6 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
+import { mkdir, rm } from "node:fs/promises";
 import { volumeDirectoryName } from "./compose.js";
+import { containerCli } from "./container.js";
 import { BranchLiftError } from "./errors.js";
 import { runCommand } from "./process.js";
 import type { ComposeInspection, PublishedPort, VolumeBinding } from "./types.js";
@@ -27,14 +29,15 @@ export interface ComposeServiceStatus {
 }
 
 export async function assertDockerReady(): Promise<void> {
-  const result = await runCommand("docker", ["info", "--format", "{{.ServerVersion}}"], { allowFailure: true });
+  const executable = containerCli();
+  const result = await runCommand(executable, ["info"], { allowFailure: true, maxOutputBytes: 4 * 1024 * 1024 });
   if (result.exitCode !== 0) {
-    throw new BranchLiftError("Docker is not ready.", "Start Docker or a compatible Docker daemon and retry.");
+    throw new BranchLiftError(`${executable === "podman" ? "Podman" : "Docker"} is not ready.`, `Start ${executable} and retry.`);
   }
-  const compose = await runCommand("docker", ["compose", "version"], { allowFailure: true });
-  if (compose.exitCode !== 0) throw new BranchLiftError("Docker Compose v2 is required.");
+  const compose = await runCommand(executable, ["compose", "version"], { allowFailure: true });
+  if (compose.exitCode !== 0) throw new BranchLiftError(`${executable} compose is required.`);
   const version = parseComposeVersion(compose.stdout || compose.stderr);
-  if (version !== undefined && compareVersion(version, [2, 24, 4]) < 0) {
+  if (executable === "docker" && version !== undefined && compareVersion(version, [2, 24, 4]) < 0) {
     throw new BranchLiftError(
       `Docker Compose 2.24.4 or newer is required; found ${version.join(".")}.`,
       "Upgrade Docker Desktop or the Docker Compose plugin. BranchLift uses the Compose !override merge tag for collision-free ports.",
@@ -57,7 +60,7 @@ function compareVersion(left: readonly number[], right: readonly number[]): numb
 }
 
 export async function validateCompose(runtime: ComposeRuntime): Promise<void> {
-  await runCommand("docker", [...composeArgs(runtime), "config", "--quiet"], { cwd: runtime.cwd });
+  await runCommand(containerCli(), [...composeArgs(runtime), "config", "--quiet"], { cwd: runtime.cwd });
 }
 
 export async function composeUp(
@@ -72,12 +75,12 @@ export async function composeUp(
       await prepareRuntimeStateOwnership(runtime, managedVolumes, volumeRoot, quiet);
     }
     await runCommand(
-      "docker",
+      containerCli(),
       [...composeArgs(runtime), "up", "-d", "--wait", "--wait-timeout", String(timeoutSeconds)],
       { cwd: runtime.cwd, stdio: quiet ? "capture" : "inherit" },
     );
   } catch (error) {
-    const logs = await runCommand("docker", [...composeArgs(runtime), "logs", "--no-color", "--tail", "80"], {
+    const logs = await runCommand(containerCli(), [...composeArgs(runtime), "logs", "--no-color", "--tail", "80"], {
       cwd: runtime.cwd,
       allowFailure: true,
       maxOutputBytes: 4 * 1024 * 1024,
@@ -98,7 +101,7 @@ async function prepareRuntimeStateOwnership(
   volumeRoot: string,
   quiet: boolean,
 ): Promise<void> {
-  await runCommand("docker", [...composeArgs(runtime), "create"], {
+  await runCommand(containerCli(), [...composeArgs(runtime), "create"], {
     cwd: runtime.cwd,
     stdio: quiet ? "capture" : "inherit",
   });
@@ -126,12 +129,12 @@ export async function normalizeRuntimeStateOwnership(
   for (const volume of unique.values()) {
     if (volume.readOnly) continue;
     await runCommand(
-      "docker",
+      containerCli(),
       [...composeArgs(runtime), "exec", "-T", "--user", "0", volume.service, "chown", "-R", owner, volume.target],
       { cwd: runtime.cwd, allowFailure: true },
     );
   }
-  await runCommand("docker", [...composeArgs(runtime), "stop"], { cwd: runtime.cwd, allowFailure: true });
+  await runCommand(containerCli(), [...composeArgs(runtime), "stop"], { cwd: runtime.cwd, allowFailure: true });
   if (volumeRoot === undefined) return;
   for (const volume of unique.values()) {
     if (volume.readOnly) continue;
@@ -169,18 +172,20 @@ export async function reclaimManagedTreeOwnership(
 }
 
 async function runtimeServiceOwner(runtime: ComposeRuntime, service: string): Promise<string | undefined> {
-  const containers = await runCommand("docker", [...composeArgs(runtime), "ps", "--all", "--quiet", service], {
+  const containers = await runCommand(containerCli(), [...composeArgs(runtime), "ps", "--all", "--quiet", service], {
     cwd: runtime.cwd,
     allowFailure: true,
   });
   const container = containers.stdout.split("\n").map((value) => value.trim()).find(Boolean);
   if (container === undefined) return undefined;
-  const inspected = await runCommand("docker", ["inspect", "--format", "{{.Config.User}}", container], {
+  const inspected = await runCommand(containerCli(), ["inspect", "--format", "{{.Config.User}}", container], {
     cwd: runtime.cwd,
     allowFailure: true,
   });
   const owner = inspected.stdout.trim();
-  return inspected.exitCode === 0 && /^\d+(?::\d+)?$/.test(owner) ? owner : undefined;
+  const numericOwner = /^\d+(?::\d+)?$/.test(owner);
+  const namedOwner = /^[a-z_][a-z0-9_-]{0,63}(?::[a-z_][a-z0-9_-]{0,63})?$/i.test(owner);
+  return inspected.exitCode === 0 && (numericOwner || namedOwner) ? owner : undefined;
 }
 
 async function chownRuntimeDirectory(
@@ -191,7 +196,7 @@ async function chownRuntimeDirectory(
 ): Promise<boolean> {
   for (const image of helperImages) {
     const result = await runCommand(
-      "docker",
+      containerCli(),
       [
         "run",
         "--rm",
@@ -220,12 +225,12 @@ async function runtimeStateHelperImages(runtime: ComposeRuntime, services: strin
   const images = new Set<string>();
   for (const service of new Set(services)) {
     const containers = await runCommand(
-      "docker",
+      containerCli(),
       [...composeArgs(runtime), "ps", "--all", "--quiet", service],
       { cwd: runtime.cwd, allowFailure: true },
     );
     for (const container of containers.stdout.split("\n").map((value) => value.trim()).filter(Boolean)) {
-      const inspected = await runCommand("docker", ["inspect", "--format", "{{.Image}}", container], {
+      const inspected = await runCommand(containerCli(), ["inspect", "--format", "{{.Image}}", container], {
         cwd: runtime.cwd,
         allowFailure: true,
       });
@@ -244,7 +249,7 @@ export async function composeLogs(
   if (options.timestamps) args.push("--timestamps");
   if (options.follow) args.push("--follow");
   if (options.service !== undefined) args.push(options.service);
-  return await runCommand("docker", args, {
+  return await runCommand(containerCli(), args, {
     cwd: runtime.cwd,
     stdio: options.follow ? "inherit" : "capture",
     allowFailure: false,
@@ -254,7 +259,7 @@ export async function composeLogs(
 export async function composeServiceStatuses(runtime: ComposeRuntime): Promise<ComposeServiceStatus[] | undefined> {
   try {
     const result = await runCommand(
-      "docker",
+      containerCli(),
       [...composeArgs(runtime), "ps", "--all", "--format", "json"],
       { cwd: runtime.cwd, allowFailure: true },
     );
@@ -273,14 +278,14 @@ export async function composeServiceStatuses(runtime: ComposeRuntime): Promise<C
 }
 
 export async function composeDown(runtime: ComposeRuntime): Promise<void> {
-  await runCommand("docker", [...composeArgs(runtime), "down", "--remove-orphans"], {
+  await runCommand(containerCli(), [...composeArgs(runtime), "down", "--remove-orphans"], {
     cwd: runtime.cwd,
     stdio: "inherit",
   });
 }
 
 export async function composeStop(runtime: ComposeRuntime): Promise<void> {
-  await runCommand("docker", [...composeArgs(runtime), "stop"], {
+  await runCommand(containerCli(), [...composeArgs(runtime), "stop"], {
     cwd: runtime.cwd,
     stdio: "inherit",
   });
@@ -288,7 +293,7 @@ export async function composeStop(runtime: ComposeRuntime): Promise<void> {
 
 export async function sourceRunningServices(runtime: SourceComposeRuntime): Promise<string[]> {
   const result = await runCommand(
-    "docker",
+    containerCli(),
     [...sourceComposeArgs(runtime), "ps", "--status", "running", "--services"],
     { cwd: runtime.cwd },
   );
@@ -297,14 +302,14 @@ export async function sourceRunningServices(runtime: SourceComposeRuntime): Prom
 
 export async function stopSourceServices(runtime: SourceComposeRuntime, services: string[]): Promise<void> {
   if (services.length === 0) return;
-  await runCommand("docker", [...sourceComposeArgs(runtime), "stop", ...services], {
+  await runCommand(containerCli(), [...sourceComposeArgs(runtime), "stop", ...services], {
     cwd: runtime.cwd,
   });
 }
 
 export async function startSourceServices(runtime: SourceComposeRuntime, services: string[]): Promise<void> {
   if (services.length === 0) return;
-  await runCommand("docker", [...sourceComposeArgs(runtime), "start", ...services], {
+  await runCommand(containerCli(), [...sourceComposeArgs(runtime), "start", ...services], {
     cwd: runtime.cwd,
   });
 }
@@ -316,7 +321,7 @@ export async function copySourceServicePathToHost(
   destination: string,
 ): Promise<void> {
   const container = await runCommand(
-    "docker",
+    containerCli(),
     [...sourceComposeArgs(runtime), "ps", "--all", "--quiet", service],
     { cwd: runtime.cwd },
   );
@@ -336,7 +341,7 @@ export async function copyServicePathToHost(
   sourcePath: string,
   destination: string,
 ): Promise<void> {
-  const container = await runCommand("docker", [...composeArgs(runtime), "ps", "--all", "--quiet", service], {
+  const container = await runCommand(containerCli(), [...composeArgs(runtime), "ps", "--all", "--quiet", service], {
     cwd: runtime.cwd,
   });
   const id = container.stdout.trim().split("\n").find(Boolean);
@@ -344,14 +349,100 @@ export async function copyServicePathToHost(
   await extractContainerPath(id, sourcePath, destination, runtime.cwd);
 }
 
+/**
+ * Creates the Compose containers and copies portable snapshot directories into
+ * selected runtime-native volumes. Native volumes are used for engines such as
+ * MongoDB/WiredTiger that cannot reliably reopen macOS file-sharing binds.
+ */
+export async function hydrateNativeVolumes(
+  runtime: ComposeRuntime,
+  volumes: VolumeBinding[],
+  volumeRoot: string,
+  quiet = false,
+): Promise<void> {
+  if (volumes.length === 0) return;
+  await runCommand(containerCli(), [...composeArgs(runtime), "create"], {
+    cwd: runtime.cwd,
+    stdio: quiet ? "capture" : "inherit",
+  });
+  for (const volume of uniqueWritableBindings(volumes).values()) {
+    const container = await serviceContainer(runtime, volume.service);
+    const source = join(volumeRoot, volumeDirectoryName(volume.source));
+    await runCommand(containerCli(), ["cp", `${source}/.`, `${container}:${volume.target}`], { cwd: runtime.cwd });
+    const owner = await runtimeServiceOwner(runtime, volume.service);
+    if (owner === undefined || owner === "0" || owner.startsWith("0:")) continue;
+    const image = await containerImage(container, runtime.cwd);
+    await runCommand(
+      containerCli(),
+      [
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--user",
+        "0",
+        "--entrypoint",
+        "chown",
+        "--volumes-from",
+        container,
+        image,
+        "-R",
+        owner,
+        volume.target,
+      ],
+      { cwd: runtime.cwd },
+    );
+  }
+}
+
+/** Export selected runtime-native volumes back into the portable host snapshot layout. */
+export async function exportNativeVolumes(
+  runtime: ComposeRuntime,
+  volumes: VolumeBinding[],
+  volumeRoot: string,
+): Promise<void> {
+  if (volumes.length === 0) return;
+  await runCommand(containerCli(), [...composeArgs(runtime), "create"], { cwd: runtime.cwd });
+  for (const volume of uniqueWritableBindings(volumes).values()) {
+    const destination = join(volumeRoot, volumeDirectoryName(volume.source));
+    await rm(destination, { recursive: true, force: true });
+    await mkdir(destination, { recursive: true });
+    await copyServicePathToHost(runtime, volume.service, volume.target, destination);
+  }
+}
+
+function uniqueWritableBindings(volumes: VolumeBinding[]): Map<string, VolumeBinding> {
+  return new Map(
+    volumes
+      .filter((volume) => !volume.readOnly)
+      .map((volume) => [`${volume.source}\0${volume.service}\0${volume.target}`, volume] as const),
+  );
+}
+
+async function serviceContainer(runtime: ComposeRuntime, service: string): Promise<string> {
+  const result = await runCommand(containerCli(), [...composeArgs(runtime), "ps", "--all", "--quiet", service], {
+    cwd: runtime.cwd,
+  });
+  const container = result.stdout.split("\n").map((value) => value.trim()).find(Boolean);
+  if (container === undefined) throw new BranchLiftError(`Cannot find the stopped ${service} container for state hydration.`);
+  return container;
+}
+
+async function containerImage(container: string, cwd: string): Promise<string> {
+  const result = await runCommand(containerCli(), ["inspect", "--format", "{{.Image}}", container], { cwd });
+  const image = result.stdout.trim();
+  if (image === "") throw new BranchLiftError(`Cannot determine the image for container ${container}.`);
+  return image;
+}
+
 export async function removeDockerVolumes(names: Iterable<string>, allowFailure = false): Promise<void> {
   for (const name of names) {
-    await runCommand("docker", ["volume", "rm", name], { allowFailure });
+    await runCommand(containerCli(), ["volume", "rm", name], { allowFailure });
   }
 }
 
 export async function composeDownBestEffort(runtime: ComposeRuntime): Promise<void> {
-  await runCommand("docker", [...composeArgs(runtime), "down", "--remove-orphans"], {
+  await runCommand(containerCli(), [...composeArgs(runtime), "down", "--remove-orphans"], {
     cwd: runtime.cwd,
     allowFailure: true,
   });
@@ -362,7 +453,7 @@ export async function composeSeed(
   service: string,
   command: string[],
 ): Promise<void> {
-  await runCommand("docker", [...composeArgs(runtime), "exec", "-T", service, ...command], {
+  await runCommand(containerCli(), [...composeArgs(runtime), "exec", "-T", service, ...command], {
     cwd: runtime.cwd,
     stdio: "inherit",
   });
@@ -374,7 +465,7 @@ export async function publishedPorts(
 ): Promise<PublishedPort[]> {
   const groups = await Promise.all(inspection.ports.map(async (binding) => {
     const target = binding.protocol === "udp" ? `${binding.target}/udp` : String(binding.target);
-    const result = await runCommand("docker", [...composeArgs(runtime), "port", binding.service, target], {
+    const result = await runCommand(containerCli(), [...composeArgs(runtime), "port", binding.service, target], {
       cwd: runtime.cwd,
       allowFailure: true,
     });
@@ -418,7 +509,7 @@ async function extractContainerPath(
   cwd: string,
 ): Promise<void> {
   const source = `${container}:${sourcePath.replace(/\/$/, "")}/.`;
-  const docker = spawn("docker", ["cp", source, "-"], {
+  const docker = spawn(containerCli(), ["cp", source, "-"], {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
     shell: false,

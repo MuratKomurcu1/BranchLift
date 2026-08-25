@@ -70,6 +70,8 @@ function inspection(repo: RepoInfo, volume: string): ComposeInspection {
     postgresServices: [],
     postgresDataDirectories: {},
     mysqlServices: [],
+    mongodbServices: [],
+    kafkaServices: [],
     serviceCommands: {},
     volumes: [{ source: volume, target: "/data", service: "db", readOnly: false, external: false }],
     bindMounts: [],

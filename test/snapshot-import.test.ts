@@ -104,6 +104,8 @@ function inspection(): ComposeInspection {
     postgresServices: ["db"],
     postgresDataDirectories: {},
     mysqlServices: [],
+    mongodbServices: [],
+    kafkaServices: [],
     serviceCommands: {},
     volumes: [
       { source: "db_data", target: "/var/lib/postgresql/data", service: "db", readOnly: false, external: false },

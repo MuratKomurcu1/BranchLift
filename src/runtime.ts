@@ -7,9 +7,11 @@ import {
   assertDockerReady,
   composeDownBestEffort,
   composeUp,
+  hydrateNativeVolumes,
   normalizeRuntimeStateOwnership,
   publishedPorts,
   reclaimManagedTreeOwnership,
+  removeDockerVolumes,
   validateCompose,
 } from "./docker.js";
 import { BranchLiftError, errorDetail } from "./errors.js";
@@ -40,6 +42,7 @@ import type {
   BranchLiftConfig,
   InstanceMetadata,
   RepoInfo,
+  VolumeBinding,
   WorktreeOwner,
 } from "./types.js";
 
@@ -268,6 +271,9 @@ async function provisionInstanceLocked(
       return strategy;
     }));
     metadata.copyStrategy = copyStrategies.reduce(mergeStrategies, metadata.copyStrategy);
+    const nativeVolumes = runtimeNativeVolumeMap(inspection, composeProject, metadata.id.slice(0, 8));
+    if (nativeVolumes.size === 0) delete metadata.nativeVolumes;
+    else metadata.nativeVolumes = Object.fromEntries(nativeVolumes);
 
     await copyConfiguredFiles(repo, config, worktreePath);
     const secretEnvFile = await materializeSecretEnv(repo, slug, await resolveSecrets(repo, config, "compose"));
@@ -282,6 +288,7 @@ async function provisionInstanceLocked(
           ? {}
           : { postgresDataDirectories: new Map(Object.entries(snapshot.postgresDataDirectories)) }),
         mysqlLowerCaseTableNames: snapshot.mysqlLowerCaseTableNames ?? 1,
+        nativeVolumes,
       }),
     );
     await writeInstanceMetadata(repo, slug, metadata);
@@ -293,13 +300,24 @@ async function provisionInstanceLocked(
       ...(metadata.secretEnvFile === undefined ? {} : { envFile: metadata.secretEnvFile }),
     };
     await validateCompose(runtime);
+    if (options.start || nativeVolumes.size > 0) await assertDockerReady();
+    const nativeBindings = bindingsForNativeVolumes(inspection.volumes, nativeVolumes);
+    if (nativeBindings.length > 0) {
+      await hydrateNativeVolumes(runtime, nativeBindings, volumeRoot, options.quiet ?? false);
+    }
 
     if (options.start) {
-      await assertDockerReady();
-      await composeUp(runtime, config.snapshot.healthTimeoutSeconds, options.quiet ?? false, inspection.volumes, volumeRoot);
+      await composeUp(
+        runtime,
+        config.snapshot.healthTimeoutSeconds,
+        options.quiet ?? false,
+        bindingsForHostVolumes(inspection.volumes, nativeVolumes),
+        volumeRoot,
+      );
       metadata.ports = await publishedPorts(runtime, inspection);
       metadata.status = "running";
     } else {
+      if (nativeBindings.length > 0) await composeDownBestEffort(runtime);
       metadata.status = "stopped";
     }
     metadata.updatedAt = new Date().toISOString();
@@ -354,7 +372,13 @@ async function startInstanceLocked(
     await assertDockerReady();
     const runtime = runtimeFromMetadata(metadata);
     await validateCompose(runtime);
-    await composeUp(runtime, config.snapshot.healthTimeoutSeconds, quiet, inspection.volumes, metadata.volumeRoot);
+    await composeUp(
+      runtime,
+      config.snapshot.healthTimeoutSeconds,
+      quiet,
+      bindingsForHostVolumes(inspection.volumes, nativeVolumeMap(metadata)),
+      metadata.volumeRoot,
+    );
     metadata.ports = await publishedPorts(runtime, inspection);
     metadata.managedVolumes = inspection.volumes;
     metadata.status = "running";
@@ -384,7 +408,11 @@ async function stopInstanceLocked(repo: RepoInfo, branch: string): Promise<Insta
   const slug = safeSlug(branch);
   const metadata = await readInstanceMetadata(repo, slug);
   const runtime = runtimeFromMetadata(metadata);
-  await normalizeRuntimeStateOwnership(runtime, metadata.managedVolumes ?? [], metadata.volumeRoot);
+  await normalizeRuntimeStateOwnership(
+    runtime,
+    bindingsForHostVolumes(metadata.managedVolumes ?? [], nativeVolumeMap(metadata)),
+    metadata.volumeRoot,
+  );
   await composeDownBestEffort(runtime);
   metadata.status = "stopped";
   metadata.ports = [];
@@ -429,18 +457,25 @@ async function resetInstanceLocked(
   const hadVolumeRoot = metadata.volumeRoot !== undefined;
   const previousVolumeRoot = metadata.volumeRoot ?? join(root, "volumes");
   const previousOverrideFile = metadata.overrideFile;
+  const previousNativeVolumes = metadata.nativeVolumes;
   assertManagedChild(previousVolumeRoot, root);
   assertManagedChild(previousOverrideFile, root);
   let pendingVolumeRoot: string | undefined;
   let pendingOverrideFile: string | undefined;
-  let generationAdopted = false;
+  let pendingNativeVolumes = new Map<string, string>();
+  let pendingRuntime: ReturnType<typeof runtimeFromMetadata> | undefined;
   try {
     const previousRuntime = runtimeFromMetadata(metadata);
-    await normalizeRuntimeStateOwnership(previousRuntime, metadata.managedVolumes ?? inspection.volumes, previousVolumeRoot);
+    await normalizeRuntimeStateOwnership(
+      previousRuntime,
+      bindingsForHostVolumes(metadata.managedVolumes ?? inspection.volumes, nativeVolumeMap(metadata)),
+      previousVolumeRoot,
+    );
     await composeDownBestEffort(previousRuntime);
     const generation = randomUUID().slice(0, 8);
     const volumeRoot = join(root, `volumes-${generation}`);
     const overrideFile = join(root, `compose-${generation}.override.yaml`);
+    pendingNativeVolumes = runtimeNativeVolumeMap(inspection, metadata.composeProject, generation);
     pendingVolumeRoot = volumeRoot;
     pendingOverrideFile = overrideFile;
     await createExclusiveDirectory(volumeRoot);
@@ -463,6 +498,7 @@ async function resetInstanceLocked(
           ? {}
           : { postgresDataDirectories: new Map(Object.entries(snapshot.postgresDataDirectories)) }),
         mysqlLowerCaseTableNames: snapshot.mysqlLowerCaseTableNames ?? 1,
+        nativeVolumes: pendingNativeVolumes,
       }),
     );
     const secretEnvFile = await materializeSecretEnv(repo, slug, await resolveSecrets(repo, config, "compose"));
@@ -475,27 +511,33 @@ async function resetInstanceLocked(
       project: metadata.composeProject,
       ...(metadata.secretEnvFile === undefined ? {} : { envFile: metadata.secretEnvFile }),
     };
+    pendingRuntime = runtime;
     await validateCompose(runtime);
-
-    metadata.copyStrategy = copyStrategy;
-    metadata.ports = [];
-    metadata.volumeRoot = volumeRoot;
-    metadata.overrideFile = overrideFile;
-    metadata.managedVolumes = inspection.volumes;
-    metadata.status = "creating";
-    delete metadata.error;
-    metadata.updatedAt = new Date().toISOString();
-    await writeInstanceMetadata(repo, slug, metadata);
-    generationAdopted = true;
-    await writeJsonAtomic(join(root, "context.json"), instanceContext(metadata));
+    if (start || pendingNativeVolumes.size > 0) await assertDockerReady();
+    const nativeBindings = bindingsForNativeVolumes(inspection.volumes, pendingNativeVolumes);
+    if (nativeBindings.length > 0) await hydrateNativeVolumes(runtime, nativeBindings, volumeRoot);
     if (start) {
-      await assertDockerReady();
-      await composeUp(runtime, config.snapshot.healthTimeoutSeconds, false, inspection.volumes, volumeRoot);
+      await composeUp(
+        runtime,
+        config.snapshot.healthTimeoutSeconds,
+        false,
+        bindingsForHostVolumes(inspection.volumes, pendingNativeVolumes),
+        volumeRoot,
+      );
       metadata.ports = await publishedPorts(runtime, inspection);
       metadata.status = "running";
     } else {
+      if (nativeBindings.length > 0) await composeDownBestEffort(runtime);
+      metadata.ports = [];
       metadata.status = "stopped";
     }
+    metadata.copyStrategy = copyStrategy;
+    metadata.volumeRoot = volumeRoot;
+    metadata.overrideFile = overrideFile;
+    metadata.managedVolumes = inspection.volumes;
+    if (pendingNativeVolumes.size === 0) delete metadata.nativeVolumes;
+    else metadata.nativeVolumes = Object.fromEntries(pendingNativeVolumes);
+    delete metadata.error;
     metadata.updatedAt = new Date().toISOString();
     await writeInstanceMetadata(repo, slug, metadata);
     await writeJsonAtomic(join(root, "context.json"), instanceContext(metadata));
@@ -506,18 +548,19 @@ async function resetInstanceLocked(
     if (previousOverrideFile !== overrideFile) {
       await rm(previousOverrideFile, { force: true }).catch(() => undefined);
     }
+    await removeDockerVolumes(Object.values(previousNativeVolumes ?? {}), true);
   } catch (error) {
-    if (!generationAdopted) {
-      if (pendingVolumeRoot !== undefined) {
-        await rm(pendingVolumeRoot, { recursive: true, force: true }).catch(() => undefined);
-      }
-      if (pendingOverrideFile !== undefined) {
-        await rm(pendingOverrideFile, { force: true }).catch(() => undefined);
-      }
-      metadata.overrideFile = previousOverrideFile;
-      if (hadVolumeRoot) metadata.volumeRoot = previousVolumeRoot;
-      else delete metadata.volumeRoot;
+    if (pendingRuntime !== undefined) await composeDownBestEffort(pendingRuntime);
+    await removeDockerVolumes(pendingNativeVolumes.values(), true);
+    if (pendingVolumeRoot !== undefined) {
+      await rm(pendingVolumeRoot, { recursive: true, force: true }).catch(() => undefined);
     }
+    if (pendingOverrideFile !== undefined) await rm(pendingOverrideFile, { force: true }).catch(() => undefined);
+    metadata.overrideFile = previousOverrideFile;
+    if (hadVolumeRoot) metadata.volumeRoot = previousVolumeRoot;
+    else delete metadata.volumeRoot;
+    if (previousNativeVolumes === undefined) delete metadata.nativeVolumes;
+    else metadata.nativeVolumes = previousNativeVolumes;
     await markInstanceFailed(repo, slug, metadata, error);
     throw error;
   }
@@ -579,7 +622,11 @@ async function destroyInstanceLocked(
   }
   const runtime = runtimeFromMetadata(metadata);
   if ((await Promise.all(runtime.composeFiles.map(async (file) => await pathExists(file)))).every(Boolean) && (await pathExists(runtime.overrideFile))) {
-    await normalizeRuntimeStateOwnership(runtime, metadata.managedVolumes ?? [], metadata.volumeRoot);
+    await normalizeRuntimeStateOwnership(
+      runtime,
+      bindingsForHostVolumes(metadata.managedVolumes ?? [], nativeVolumeMap(metadata)),
+      metadata.volumeRoot,
+    );
     await composeDownBestEffort(runtime);
   }
 
@@ -594,7 +641,12 @@ async function destroyInstanceLocked(
   if (!resolvedRoot.startsWith(`${managedParent}/`)) {
     throw new BranchLiftError(`Refusing to remove a path outside BranchLift state: ${resolvedRoot}`);
   }
-  await reclaimManagedTreeOwnership(runtime, metadata.managedVolumes ?? [], metadata.volumeRoot).catch(() => undefined);
+  await reclaimManagedTreeOwnership(
+    runtime,
+    bindingsForHostVolumes(metadata.managedVolumes ?? [], nativeVolumeMap(metadata)),
+    metadata.volumeRoot,
+  ).catch(() => undefined);
+  await removeDockerVolumes(Object.values(metadata.nativeVolumes ?? {}), true);
   await rm(resolvedRoot, { recursive: true, force: false });
   return { runtimeRemoved: true, worktreeRemoved };
 }
@@ -741,6 +793,37 @@ export function runtimeFromMetadata(metadata: InstanceMetadata) {
     project: metadata.composeProject,
     ...(metadata.secretEnvFile === undefined ? {} : { envFile: metadata.secretEnvFile }),
   };
+}
+
+/** MongoDB/WiredTiger cannot reliably reopen Docker Desktop bind mounts on macOS. */
+export function runtimeNativeVolumeMap(
+  inspection: ComposeInspection,
+  project: string,
+  generation: string,
+  platform = process.platform,
+): Map<string, string> {
+  if (platform !== "darwin") return new Map();
+  const mongodbServices = new Set(inspection.mongodbServices);
+  return new Map(
+    inspection.volumes
+      .filter((volume) => !volume.readOnly && mongodbServices.has(volume.service))
+      .map((volume) => [
+        volume.source,
+        `${project}-${volumeDirectoryName(volume.source)}-${safeSlug(generation)}`,
+      ] as const),
+  );
+}
+
+function nativeVolumeMap(metadata: InstanceMetadata): Map<string, string> {
+  return new Map(Object.entries(metadata.nativeVolumes ?? {}));
+}
+
+function bindingsForNativeVolumes(volumes: VolumeBinding[], nativeVolumes: ReadonlyMap<string, string>): VolumeBinding[] {
+  return volumes.filter((volume) => nativeVolumes.has(volume.source));
+}
+
+function bindingsForHostVolumes(volumes: VolumeBinding[], nativeVolumes: ReadonlyMap<string, string>): VolumeBinding[] {
+  return volumes.filter((volume) => !nativeVolumes.has(volume.source));
 }
 
 function assertManagedChild(path: string, parent: string): void {

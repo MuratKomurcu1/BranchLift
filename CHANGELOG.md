@@ -2,8 +2,16 @@
 
 ## Unreleased
 
+## 1.4.0 - 2026-08-25
+
 - Redesign the local control plane as a responsive macOS-style desktop experience with light/dark appearance, section navigation, a real-state onboarding checklist, health summaries, guided empty states, a command palette, accessible forms, and operation-specific remote controls.
 - Add a deterministic product-proof visual and an explicit, evidence-based Coasts comparison that positions BranchLift as the deeper versioned backend-state layer rather than an all-in-one session orchestrator.
+- Add `branchlift demo` and an idempotent `quickstart` flow that can configure, approve, snapshot, and launch a Compose repository with one command while retaining explicit policy consent.
+- Add a private five-lane agent workspace with prompts, drag-and-drop task state, CLI parity, registered-worktree-only bounded Git diff review, and audit events.
+- Add opt-in viewer/operator/admin UI tokens with digest-only persistence, exact-confirmation destructive actions, and a prompt/secret-free shared-filesystem node registry.
+- Add explicit Docker/Podman local runtime selection, honest native/WSL2 platform diagnostics, named container-user ownership handling, and MongoDB/Kafka discovery plus runnable lifecycle examples.
+- Add portable-to-native MongoDB runtime hydration/export for macOS Docker Desktop, including reset, child-snapshot commit, cleanup, and a real MongoDB 8 + Kafka 3.9 mutation lifecycle gate in CI and release publication.
+- Expand tests for quickstart scaffolding, platform classification, team registry/RBAC, workspace tasks/diffs, and MongoDB/Kafka Compose contracts.
 
 ## 1.3.2
 

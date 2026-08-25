@@ -33,6 +33,15 @@ test("inspects stateful services, named volumes, and ports", async () => {
   assert.deepEqual(inspection.blockers, []);
 });
 
+test("recognizes MongoDB and Kafka-compatible state volumes", async () => {
+  const inspection = await inspectCompose(fixture("compose.mongo-kafka.yaml"));
+  assert.deepEqual(inspection.inferredStatefulServices, ["kafka", "mongodb"]);
+  assert.deepEqual(inspection.mongodbServices, ["mongodb"]);
+  assert.deepEqual(inspection.kafkaServices, ["kafka"]);
+  assert.deepEqual(inspection.volumes.map(({ source }) => source).sort(), ["kafka_data", "mongo_data"]);
+  assert.deepEqual(inspection.blockers, []);
+});
+
 test("generates a Compose override with bind-mounted state and random ports", async () => {
   const inspection = await inspectCompose(fixture("compose.valid.yaml"));
   const output = generateOverride(inspection, "/tmp/fork stack/volumes", {

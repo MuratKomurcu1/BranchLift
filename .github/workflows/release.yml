@@ -11,7 +11,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v7
@@ -25,6 +25,7 @@ jobs:
       - name: Preload the explicitly approved sandbox test image
         run: docker pull alpine:3.22
       - run: npm run test:e2e
+      - run: npm run test:e2e:mongo-kafka
       - name: Build release tarball
         run: npm pack
       - name: Attach tarball to GitHub Release

@@ -3,6 +3,7 @@ import { readdir, rename } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { volumeDirectoryName } from "./compose.js";
 import { BranchLiftError } from "./errors.js";
+import { containerCli } from "./container.js";
 import {
   instanceLockScope,
   listLocks,
@@ -65,7 +66,7 @@ export interface DoctorReport {
 
 export async function inspectDockerProjects(): Promise<Map<string, DockerProjectState>> {
   const result = await runCommand(
-    "docker",
+    containerCli(),
     [
       "ps",
       "-a",
@@ -85,7 +86,7 @@ export async function inspectDockerProjects(): Promise<Map<string, DockerProject
     projects.set(project, current);
   }
   for (const group of ["network", "volume"] as const) {
-    const resources = await runCommand("docker", [
+    const resources = await runCommand(containerCli(), [
       group,
       "ls",
       "--filter",
@@ -454,16 +455,16 @@ async function diagnosticProjectNames(repo: RepoInfo): Promise<Set<string>> {
 
 async function removeDockerProject(project: string): Promise<void> {
   const containers = await dockerResourceIds("ps", ["-a", "-q"], project);
-  if (containers.length > 0) await runCommand("docker", ["rm", "-f", ...containers]);
+  if (containers.length > 0) await runCommand(containerCli(), ["rm", "-f", ...containers]);
 
   const networks = await dockerResourceIds("network", ["ls", "-q"], project);
   for (const network of networks) {
-    await runCommand("docker", ["network", "rm", network], { allowFailure: true });
+    await runCommand(containerCli(), ["network", "rm", network], { allowFailure: true });
   }
 
   const volumes = await dockerResourceIds("volume", ["ls", "-q"], project);
   for (const volume of volumes) {
-    await runCommand("docker", ["volume", "rm", volume], { allowFailure: true });
+    await runCommand(containerCli(), ["volume", "rm", volume], { allowFailure: true });
   }
   if ((await inspectDockerProjects()).has(project)) {
     throw new BranchLiftError(`Docker resources for ${project} could not be removed completely.`);
@@ -477,7 +478,7 @@ async function dockerResourceIds(group: string, args: string[], project: string)
     "--filter",
     `label=com.docker.compose.project=${project}`,
   ];
-  const result = await runCommand("docker", command, { allowFailure: true });
+  const result = await runCommand(containerCli(), command, { allowFailure: true });
   return result.exitCode === 0 ? result.stdout.split("\n").map((value) => value.trim()).filter(Boolean) : [];
 }
 

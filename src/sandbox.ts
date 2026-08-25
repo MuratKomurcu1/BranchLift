@@ -3,6 +3,7 @@ import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { effectiveSecurity } from "./config.js";
 import { assertDockerReady, composeArgs } from "./docker.js";
+import { containerCli } from "./container.js";
 import { BranchLiftError } from "./errors.js";
 import { recordEventBestEffort } from "./events.js";
 import { instanceRoot, pathExists, safeSlug } from "./paths.js";
@@ -141,7 +142,7 @@ async function runDockerSandbox(
   await assertDockerReady();
   assertDockerReference(posture.image);
   assertMountablePath(metadata.worktreePath);
-  const imageCheck = await runCommand("docker", ["image", "inspect", posture.image], { allowFailure: true });
+  const imageCheck = await runCommand(containerCli(), ["image", "inspect", posture.image], { allowFailure: true });
   if (imageCheck.exitCode !== 0) {
     throw new BranchLiftError(
       `Sandbox image is not present locally: ${posture.image}`,
@@ -225,7 +226,7 @@ async function runDockerSandbox(
       if (value !== undefined) args.push("--env", `${key}=${value}`);
     }
     args.push(posture.image, ...command);
-    const result = await runCommand("docker", args, { stdio: "inherit", allowFailure: true });
+    const result = await runCommand(containerCli(), args, { stdio: "inherit", allowFailure: true });
     return result.exitCode;
   } finally {
     if (attachment !== undefined) await detachBackendNetwork(attachment);
@@ -238,7 +239,7 @@ async function attachBackendNetwork(metadata: InstanceMetadata, shortId: string)
     throw new BranchLiftError(`Backend-only sandbox networking requires a running instance; ${metadata.branch} is ${metadata.status}.`);
   }
   const network = `bl-sbx-${shortId}`;
-  await runCommand("docker", [
+  await runCommand(containerCli(), [
     "network",
     "create",
     "--internal",
@@ -249,13 +250,13 @@ async function attachBackendNetwork(metadata: InstanceMetadata, shortId: string)
     network,
   ]);
   const runtime = runtimeFromMetadata(metadata);
-  const servicesResult = await runCommand("docker", [...composeArgs(runtime), "ps", "--services", "--status", "running"]);
+  const servicesResult = await runCommand(containerCli(), [...composeArgs(runtime), "ps", "--services", "--status", "running"]);
   const containers: string[] = [];
   try {
     for (const service of servicesResult.stdout.split("\n").map((value) => value.trim()).filter(Boolean)) {
-      const result = await runCommand("docker", [...composeArgs(runtime), "ps", "--quiet", service]);
+      const result = await runCommand(containerCli(), [...composeArgs(runtime), "ps", "--quiet", service]);
       for (const id of result.stdout.split("\n").map((value) => value.trim()).filter(Boolean)) {
-        await runCommand("docker", ["network", "connect", "--alias", service, network, id]);
+        await runCommand(containerCli(), ["network", "connect", "--alias", service, network, id]);
         containers.push(id);
       }
     }
@@ -269,9 +270,9 @@ async function attachBackendNetwork(metadata: InstanceMetadata, shortId: string)
 
 async function detachBackendNetwork(attachment: NetworkAttachment): Promise<void> {
   for (const container of attachment.containers) {
-    await runCommand("docker", ["network", "disconnect", "--force", attachment.network, container], { allowFailure: true });
+    await runCommand(containerCli(), ["network", "disconnect", "--force", attachment.network, container], { allowFailure: true });
   }
-  await runCommand("docker", ["network", "rm", attachment.network], { allowFailure: true });
+  await runCommand(containerCli(), ["network", "rm", attachment.network], { allowFailure: true });
 }
 
 function sandboxEnvironment(

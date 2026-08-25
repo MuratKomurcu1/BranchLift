@@ -1,6 +1,6 @@
 {
   "name": "branchlift",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "description": "Stateful backend environments for parallel coding agents and git worktrees.",
   "homepage": "https://github.com/MuratKomurcu1/BranchLift#readme",
   "repository": {
@@ -32,6 +32,7 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/**/*.test.js",
     "test:e2e": "BRANCHLIFT_E2E=1 npm test",
+    "test:e2e:mongo-kafka": "npm run build && BRANCHLIFT_MONGO_KAFKA_E2E=1 node --test dist/test/mongo-kafka-e2e.test.js",
     "test:compat": "npm run build && node scripts/compatibility.mjs",
     "benchmark:synthetic": "npm run build && node scripts/benchmark-synthetic.mjs",
     "benchmark:docmost": "npm run build && node scripts/benchmark-docmost.mjs",

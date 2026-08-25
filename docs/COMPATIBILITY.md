@@ -22,7 +22,11 @@ npm run test:compat -- --json
 Database-specific production claims are narrower than generic Compose parsing:
 
 - PostgreSQL 16, Redis 7, and MySQL 8.4 LTS run in the local Docker E2E suite;
+- MongoDB 8 and Kafka 3.9 run a real seed → isolated mutation → child commit → reset → re-spawn contract in `test/mongo-kafka-e2e.test.ts`;
+- on macOS Docker Desktop, MongoDB/WiredTiger instance state is hydrated into a runtime-native volume and exported back into BranchLift's portable snapshot layout on commit;
 - generic managed named volumes are cloned and isolated;
 - other databases need a database-aware mutation/reset probe before being described as production-ready.
 
-Current non-goals: Windows, Podman, external volumes, host networking, fixed container names, production data import, and VM-grade hostile multi-tenant isolation. `sandbox run` provides a least-privilege Docker boundary for agent commands; it does not turn the project Compose stack into a hostile-code sandbox.
+The local lifecycle supports Docker Compose and explicitly selected Podman Compose. Persistent remote BuildKit remains Docker Buildx-specific. Windows is supported through WSL2 with repositories in its Linux filesystem; native Windows/NTFS is not claimed.
+
+Current non-goals: native Windows, external volumes, host networking, fixed container names, live production-database capture, and VM-grade hostile multi-tenant isolation. `snapshot import` handles stopped-consistent development Compose state. `sandbox run` provides a least-privilege container boundary for agent commands; it does not turn the project Compose stack into a hostile-code VM.

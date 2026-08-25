@@ -8,7 +8,7 @@ Positioning review, last updated August 2026. The goal is honesty, not marketing
 2. **Stateful backend isolation** — give every agent its own seeded database/queue/cache state that can be committed, diffed, and reset.
 3. **Execution isolation** — run agent commands inside a bounded security perimeter.
 
-Many teams assemble layer 1 from a GUI tool and improvise layers 2–3 with shell scripts and shared `.env` databases. Coasts is a notable exception: it combines agent workspaces with container runtimes and seeded isolated volumes. BranchLift stays deliberately thinner on layer 1 and goes deeper on versioned, semantically comparable application state.
+Many teams assemble layer 1 from a GUI tool and improvise layers 2–3 with shell scripts and shared `.env` databases. Coasts is a notable exception: it combines agent workspaces with container runtimes and seeded isolated volumes. BranchLift now includes the core human loop—private prompts, a five-lane Kanban, environment ownership, and bounded Git diff review—while going deeper on versioned, semantically comparable application state.
 
 ## Category snapshot (August 2026)
 
@@ -25,17 +25,19 @@ Many teams assemble layer 1 from a GUI tool and improvise layers 2–3 with shel
 
 ## BranchLift and Coasts, directly
 
-These projects overlap, but their centers of gravity differ. Coasts has built more of the **agent workspace**: session UX, runtime modes, shells, encrypted secret handling, seeded volumes, and a broader local/remote development surface. BranchLift has built more of the **state control plane**: stopped-consistent snapshots, parent lineage, content-addressed manifests, environment-to-snapshot commits, semantic diffs, dependency-protected deletion, and deterministic reset.
+These projects overlap, but their centers of gravity differ. Coasts remains broader in full runtime modes and DinD-oriented development. BranchLift combines a focused **agent workspace**—prompt Kanban, environment ownership, and Git review—with a deeper **state control plane**: stopped-consistent snapshots, parent lineage, content-addressed manifests, environment-to-snapshot commits, semantic diffs, dependency-protected deletion, and deterministic reset.
 
 | Question | Coasts | BranchLift |
 |---|---|---|
 | What is the primary object? | Agent workspace/runtime | Immutable backend snapshot and isolated branch instance |
+| Human task loop | Workspace/session oriented | Five-lane private-prompt Kanban with registered-worktree Git review |
 | How is initial state provided? | Shared, isolated, or snapshot-seeded volume strategy | Golden Compose snapshot with APFS/Btrfs/reflink acceleration and copy fallback |
 | Can mutated state become a named child with recorded parent and digest? | Not documented in the public contract | Yes |
 | Can two backend states be semantically diffed? | Not documented in the public contract | Yes |
 | What does reset mean? | Recreate/reseed the runtime volume | Restore the selected immutable snapshot lineage |
 | Remote control model | Broader remote development service; DinD/runtime oriented | Strict-host-key SSH allowlist; no BranchLift daemon or arbitrary host shell |
 | Remote build cache | Runtime/build support depends on workspace mode | One persistent, repository-scoped BuildKit builder with bounded/prunable cache |
+| Team access | Product workspace model | Loopback UI + viewer/operator/admin tokens + secret-free shared registry; no hosted service |
 | Best fit | One product to manage agents and their workspaces | Reproducible DB/queue/cache state underneath any agent or orchestrator |
 
 This is not a claim that BranchLift is universally “ahead.” It is a claim that teams whose hard problem is mutable backend state get a deeper, auditable state lifecycle. A team can use Coasts for workspace orchestration and BranchLift as the state layer rather than treating them as mutually exclusive.
@@ -49,15 +51,17 @@ This is not a claim that BranchLift is universally “ahead.” It is a claim th
 
 ## Honest gaps
 
-- **No session kanban or code-review workspace**: BranchLift's polished local control plane covers lifecycle, state, security, logs, tunnels, and audits, but it does not try to replace Conductor, Nimbalyst, or Coasts as the place where humans manage prompts and review code diffs.
-- **Single-player**: team features assume shared Git plus your own remote hosts; there is no built-in multiplayer workspace like AQ.
-- **Discovery**: an independent, non-VC project competes for attention against funded launches in a consolidating category (Terragon shut down 2026-01; Crystal deprecated 2026-02). Stars and word-of-mouth are its distribution.
+- **No hosted collaboration service**: team access uses loopback UI tokens, SSH tunnels, and an optional shared-filesystem inventory. There are no comments, presence indicators, SSO, or a hosted organization console.
+- **No native Windows runtime**: Windows is supported through WSL2; native NTFS worktree and container-volume ownership semantics are not claimed.
+- **Podman scope is local**: local lifecycle operations select Podman explicitly, while persistent remote builds still require Docker Buildx.
+- **Discovery**: an independent, non-VC project competes for attention against funded launches in a consolidating category. Stars and word-of-mouth are its distribution.
 
 ## Recommendation matrix
 
 | If you need… | Use |
 |---|---|
-| A visual cockpit for parallel agents | Conductor / Nimbalyst / Vibe Kanban |
+| A focused prompt → environment → Git review cockpit | BranchLift |
+| A broad session-first desktop cockpit | Conductor / Nimbalyst / Vibe Kanban |
 | An all-in-one local agent workspace with seeded volumes | Coasts |
 | Seeded per-branch PostgreSQL that resets in milliseconds | BranchLift |
 | Untrusted agent commands without handing over your host | BranchLift sandbox |

@@ -7,7 +7,9 @@
 [![Homebrew](https://img.shields.io/badge/Homebrew-tap-orange)](https://github.com/MuratKomurcu1/homebrew-tap)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-BranchLift gives parallel coding agents isolated, stateful backend environments. Git worktrees separate source files; BranchLift also separates PostgreSQL, Redis, queues, object stores, Docker networks, and published ports. Its control plane adds immutable state lineage, a least-privilege agent sandbox, scoped secret injection, SSH workers, a local UI, audit events, and MCP tools.
+BranchLift gives parallel coding agents isolated, stateful backend environments. Git worktrees separate source files; BranchLift also separates PostgreSQL, MySQL, MongoDB, Redis, Kafka, other Compose volumes, networks, and published ports. Its control plane adds immutable state lineage, a least-privilege agent sandbox, prompt-to-diff Kanban, scoped secret injection, SSH workers, role-based team access, a local UI, audit events, and MCP tools.
+
+![BranchLift's local macOS-style workspace showing five prompt-to-diff Kanban lanes for Codex, Claude, and Cursor](docs/assets/branchlift-workspace.jpg)
 
 ![BranchLift turns one immutable backend snapshot into isolated state for three parallel coding agents, then resets mutations to golden state](docs/assets/branchlift-state-proof.svg)
 
@@ -28,7 +30,7 @@ BranchLift goes deepest on the **versioned backend-state layer**. Whatever creat
 
 | Capability | Session orchestrators | Coasts | Cloud dev VMs | **BranchLift** |
 |---|---|---|---|---|
-| Agent/worktree workspace UX | ✅ core | ✅ core | partial | attaches through hooks + MCP |
+| Agent/worktree workspace UX | ✅ core | ✅ core | partial | ✅ prompt Kanban + bounded Git diff review + hooks/MCP |
 | Seeded isolated backend state | usually shared | ✅ seeded volumes | whole-VM image | ✅ any discovered Compose volume |
 | Commit → parent lineage → semantic diff → reset | ❌ | not documented | image/snapshot level | ✅ core data-plane contract |
 | Agent execution boundary | usually host | container / DinD model | ✅ VM-sized | ✅ no host socket, policy-gated |
@@ -54,16 +56,17 @@ BranchLift prepares one stopped, immutable golden snapshot and clones its state 
 
 ## Current status
 
-**The current main branch** covers PostgreSQL 16, MySQL 8.4 LTS, and Redis 7 in one real Docker end-to-end contract. It imports an existing stopped-consistent Compose state, garbage-collects old runtimes safely, and runs public Linux lifecycle evidence against pinned Docmost, n8n, and Langfuse stacks. The v2 control and data planes described below are implemented on the current main branch.
+**The current main branch** covers PostgreSQL 16, MySQL 8.4 LTS, MongoDB 8, Kafka 3.9, and Redis 7 through real container lifecycle contracts. The MongoDB/Kafka contract verifies seed, isolated mutation, child-snapshot commit, reset, and re-spawned state; macOS automatically hydrates WiredTiger into a runtime-native volume while keeping snapshots portable. BranchLift also imports existing stopped-consistent Compose state, garbage-collects old runtimes safely, and runs public Linux lifecycle evidence against pinned Docmost, n8n, and Langfuse stacks.
 
 Supported today:
 
-- Docker Compose 2.24.4+;
+- Docker Compose 2.24.4+ or an explicitly selected Podman Compose provider;
 - Git worktrees;
 - named-volume discovery and isolation;
 - PostgreSQL on macOS Docker Desktop and Linux;
 - MySQL 8.4 LTS on macOS Docker Desktop and Linux;
-- Redis and generic named volumes;
+- MongoDB 8, Kafka 3.9, Redis 7, and generic named volumes;
+- macOS and Linux natively, plus Windows through WSL2 with repositories kept in the Linux filesystem;
 - APFS clonefile and Linux reflink, with recursive-copy fallback;
 - resource-limited Docker sandbox execution with all Linux capabilities dropped, `no-new-privileges`, a read-only root, no host Docker socket, and `none`, backend-only, or outbound networking;
 - host agent commands only after an explicit project policy opt-in;
@@ -90,12 +93,16 @@ Supported today:
 - one-command remote development with conflict-detecting live working-tree sync and automatic loopback SSH port tunnels;
 - sandbox-forced remote agent shells with no host-shell or Docker-socket access;
 - persistent repository-scoped BuildKit builders with remote build and exact-confirmation cache management.
+- a five-lane agent task workspace with private prompts, drag-and-drop state, prompt copy, and bounded read-only Git diff review;
+- repository-scoped viewer/operator/admin UI tokens whose raw values are shown once and never persisted;
+- a secret-free shared-filesystem node registry for teams that do not want a hosted coordination service;
+- Docker/Podman CLI selection and explicit WSL2 diagnostics without pretending native Windows ownership semantics are safe.
 
-MongoDB, Kafka, Windows, and Podman are not yet claimed as production-ready. Existing Compose state can be imported from managed named volumes, but a database-specific production claim still requires its own crash-consistency E2E contract.
+Podman support covers the local Compose, volume, sandbox, preview, and doctor lifecycle through `BRANCHLIFT_CONTAINER_CLI=podman`; remote persistent BuildKit still deliberately requires Docker Buildx. Native Windows is not supported—use WSL2.
 
 ## Install
 
-Requirements: Node.js 22+, Git, Docker, and Docker Compose 2.24.4+.
+Requirements: Node.js 22+, Git, and Docker Compose 2.24.4+ or Podman with a working Compose provider.
 
 ```bash
 npm install -g branchlift
@@ -112,6 +119,20 @@ The versioned GitHub Release tarball remains available as an npm-registry-indepe
 See [docs/INSTALL.md](docs/INSTALL.md) for requirements, source installation, and package verification.
 
 ## Quick start
+
+Try the complete product in a disposable PostgreSQL + Redis project:
+
+```bash
+branchlift demo
+```
+
+Or initialize, approve, snapshot, and launch an existing Compose repository with one command:
+
+```bash
+branchlift quickstart agent/fix-auth --trust-policy
+```
+
+`--trust-policy` is explicit because quickstart may execute reviewed Compose health checks and seed commands. Without it, BranchLift stops after configuration analysis and prints the policy digest.
 
 Run this inside an existing Git repository containing `compose.yaml` or `docker-compose.yml`:
 
@@ -306,12 +327,28 @@ branchlift remote launch lab agent/fix-auth --snapshot dev
 branchlift remote dev lab agent/fix-auth --snapshot dev
 ```
 
+The Workspace section adds a five-lane prompt Kanban and read-only Git review for registered instance worktrees. Team access is opt-in:
+
+```bash
+branchlift task add "Fix auth race" --prompt "Reproduce, fix, test, and summarize" --branch agent/fix-auth --agent codex
+branchlift team token create reviewer --role viewer
+branchlift ui --team-access
+
+# Publish prompt-free node inventory to a shared NFS/SMB/SSHFS directory
+branchlift team registry publish --directory /shared/branchlift-registry
+```
+
+The UI remains loopback-only; teammates connect through an authenticated SSH tunnel and use their repository token. Viewer can inspect, operator can create/move tasks and operate environments, and admin can reset, destroy, remove, prune, and revoke. Shared registry records intentionally exclude prompts, tokens, secret values, and worktree paths. See [docs/TEAM.md](docs/TEAM.md).
+
 `remote sync` automatically installs/verifies the user-scoped worker, transfers the exact committed Git `HEAD`, and sends only snapshot blobs the remote does not already have. `remote launch` adds an exact-commit worktree and isolated backend. `remote dev` then mirrors tracked plus untracked-nonignored working files, opens loopback SSH forwards for discovered TCP services, and keeps reconciling until stopped. Live sync is one-way and refuses remote edits rather than overwriting them. No cloud account, subscription, public control daemon, or Docker-in-Docker daemon is required. See [docs/REMOTE.md](docs/REMOTE.md).
 
 ## Commands
 
 ```text
-  branchlift init [--compose FILE]... [--dry-run] [--json]
+branchlift demo [--directory PATH] [--no-run] [--json]
+branchlift quickstart [BRANCH] [--snapshot NAME] [--no-start] [--trust-policy]
+branchlift platform [--json]
+branchlift init [--compose FILE]... [--dry-run] [--json]
 branchlift inspect [--json]
 branchlift snapshot [create] [NAME]
 branchlift snapshot import [NAME] [--project COMPOSE_PROJECT] [--json]
@@ -331,6 +368,9 @@ branchlift doctor [--fix] [--json]
 branchlift gc [--older-than 7d] [--dry-run] [--json]
 branchlift benchmark [SNAPSHOT] [--iterations N] [--json]
 branchlift agents install [all|codex|claude|cursor] [--dry-run] [--json]
+branchlift task list|add|move|remove
+branchlift team token create|list|revoke
+branchlift team registry publish|list --directory PATH
 branchlift mcp
 branchlift remote dev REMOTE BRANCH [--snapshot NAME] [--trust-policy] [--no-tunnel]
 branchlift remote live-sync REMOTE BRANCH

@@ -4,11 +4,19 @@
 
 - Node.js 22 or newer;
 - Git;
-- a running Docker daemon;
-- Docker Compose 2.24.4 or newer;
+- a running Docker daemon with Docker Compose 2.24.4+, or Podman with a working Compose provider;
 - a Git repository whose backend state uses Compose-managed named volumes.
 
 BranchLift is local software. It needs no account, hosted service, API key, or paid dependency.
+
+Use Podman explicitly for local lifecycle commands:
+
+```bash
+export BRANCHLIFT_CONTAINER_CLI=podman
+branchlift platform
+```
+
+On Windows, install and run BranchLift inside WSL2 and keep repositories in the Linux filesystem. Native Windows paths are deliberately rejected as a support claim because Git worktree and bind-volume ownership behavior differs.
 
 ## Homebrew
 
@@ -33,7 +41,7 @@ The public package is published at [npmjs.com/package/branchlift](https://www.np
 To install the immutable GitHub Release artifact without using the npm registry:
 
 ```bash
-npm install -g https://github.com/MuratKomurcu1/BranchLift/releases/download/v1.2.0/branchlift-1.2.0.tgz
+npm install -g https://github.com/MuratKomurcu1/BranchLift/releases/download/v1.4.0/branchlift-1.4.0.tgz
 ```
 
 ## Install from a checkout
@@ -50,7 +58,7 @@ branchlift --version
 
 ```bash
 npm pack
-npm install -g ./branchlift-1.2.0.tgz
+npm install -g ./branchlift-1.4.0.tgz
 branchlift --version
 ```
 
@@ -62,12 +70,11 @@ The release workflow runs type checks, unit tests, package validation, the Linux
 
 ```bash
 cd your-project
-branchlift init --dry-run
-branchlift init
-branchlift inspect
-branchlift snapshot dev
+branchlift quickstart agent/demo --trust-policy
 branchlift agents install all
 ```
+
+To try BranchLift outside an existing project, `branchlift demo` creates and launches a disposable PostgreSQL + Redis repository. Use `branchlift demo --no-run` to scaffold without starting containers.
 
 If the project uses non-standard Compose filenames, preserve merge order explicitly:
 

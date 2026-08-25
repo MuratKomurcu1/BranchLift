@@ -133,12 +133,17 @@ export function isInstanceMetadata(value: unknown): value is InstanceMetadata {
     && typeof value.overrideFile === "string"
     && (value.volumeRoot === undefined || typeof value.volumeRoot === "string")
     && (value.managedVolumes === undefined || volumeBindings(value.managedVolumes))
+    && (value.nativeVolumes === undefined || stringRecord(value.nativeVolumes))
     && typeof value.composeProject === "string"
     && typeof value.createdAt === "string"
     && typeof value.updatedAt === "string"
     && ["creating", "running", "stopped", "failed"].includes(String(value.status))
     && (value.secretEnvFile === undefined || typeof value.secretEnvFile === "string")
     && Array.isArray(value.ports);
+}
+
+function stringRecord(value: unknown): boolean {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
 }
 
 export function isSnapshotMetadata(value: unknown): value is SnapshotMetadata {

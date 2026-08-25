@@ -89,6 +89,8 @@ export interface ComposeInspection {
   postgresServices: string[];
   postgresDataDirectories: Record<string, string>;
   mysqlServices: string[];
+  mongodbServices: string[];
+  kafkaServices: string[];
   serviceCommands: Record<string, string | string[]>;
   volumes: VolumeBinding[];
   bindMounts: BindMount[];
@@ -151,6 +153,8 @@ export interface InstanceMetadata {
   overrideFile: string;
   volumeRoot?: string;
   managedVolumes?: VolumeBinding[];
+  /** Managed source volume -> container-runtime volume name for filesystems that cannot run safely as host binds. */
+  nativeVolumes?: Record<string, string>;
   composeProject: string;
   createdAt: string;
   updatedAt: string;
@@ -221,4 +225,39 @@ export interface CommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+}
+
+export type WorkspaceTaskStatus = "backlog" | "ready" | "running" | "review" | "done";
+
+export interface WorkspaceTask {
+  version: 1;
+  id: string;
+  title: string;
+  prompt: string;
+  branch?: string;
+  agent?: string;
+  status: WorkspaceTaskStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type TeamRole = "viewer" | "operator" | "admin";
+
+export interface TeamTokenDefinition {
+  version: 1;
+  id: string;
+  label: string;
+  role: TeamRole;
+  digest: string;
+  createdAt: string;
+}
+
+export interface TeamRegistryNode {
+  version: 1;
+  repository: { key: string; name: string };
+  node: { id: string; hostname: string };
+  updatedAt: string;
+  environments: Array<{ branch: string; snapshot: string; status: InstanceStatus; ports: PublishedPort[] }>;
+  snapshots: Array<{ name: string; parentSnapshot?: string; createdAt: string; sizeBytes?: number }>;
+  tasks: Array<{ id: string; title: string; status: WorkspaceTaskStatus; branch?: string; agent?: string; updatedAt: string }>;
 }
