@@ -47,7 +47,7 @@ test("generates a Compose override with bind-mounted state and random ports", as
   assert.match(output, /source: "\/tmp\/fork stack\/volumes\/pgdata-[a-f0-9]{7}"/);
   assert.match(output, /target: "\/var\/lib\/postgresql\/data"/);
   assert.match(output, /PGDATA: "\/var\/lib\/postgresql\/data\/\.branchlift-pgdata"/);
-  assert.equal(output.match(/user: "501:20"/g)?.length, 2);
+  assert.equal(output.match(/user: "501:20"/g)?.length, 1);
   assert.match(output, /- "\/var\/run\/postgresql:uid=501,gid=20,mode=3775"/);
   assert.doesNotMatch(output, /published:/);
 });
@@ -83,6 +83,20 @@ test("detects MySQL data and applies the macOS bind owner", async () => {
   assert.match(output, /user: "501:20"/);
   assert.match(output, /command: \["--lower-case-table-names=1"\]/);
   assert.doesNotMatch(output, /PGDATA:/);
+});
+
+test("does not force the host UID onto generic application or infrastructure services", async () => {
+  const inspection = await inspectCompose(fixture("compose.valid.yaml"));
+  const output = generateOverride(inspection, "/tmp/branchlift/runtime", {
+    randomizePorts: true,
+    bindHostUser: { uid: 501, gid: 20 },
+    hostUserServices: new Set(),
+  });
+
+  const apiBlock = output.split('  "api":')[1]?.split('\n  "')[0] ?? "";
+  assert.doesNotMatch(apiBlock, /user:/);
+  const redisBlock = output.split('  "redis":')[1]?.split('\n  "')[0] ?? "";
+  assert.doesNotMatch(redisBlock, /user:/);
 });
 
 test("reports isolation blockers instead of silently sharing state", async () => {

@@ -6,6 +6,7 @@ import {
   assertDockerReady,
   composeDownBestEffort,
   composeUp,
+  normalizeRuntimeStateOwnership,
   publishedPorts,
   validateCompose,
 } from "./docker.js";
@@ -17,6 +18,7 @@ import {
   copyPrivateFile,
   createExclusiveDirectory,
   instanceRoot,
+  makeTreeContainerWritable,
   pathExists,
   repoDataRoot,
   safeSlug,
@@ -217,6 +219,7 @@ async function provisionInstanceLocked(
       composeFiles: config.compose.files,
       overrideFile,
       volumeRoot,
+      managedVolumes: inspection.volumes,
       composeProject,
       createdAt: now,
       updatedAt: now,
@@ -230,19 +233,32 @@ async function provisionInstanceLocked(
   const { snapshot, metadata, volumeRoot, overrideFile, composeFiles, composeProject } = prepared;
 
   try {
-    for (const volume of snapshot.volumeNames) {
+    const hostUserServices = new Set<string>();
+    const databaseServices = new Set([...inspection.postgresServices, ...inspection.mysqlServices]);
+    const genericVolumeSources = new Set(
+      inspection.volumes
+        .filter((volume) => !databaseServices.has(volume.service) && !volume.readOnly)
+        .map((volume) => volume.source),
+    );
+    const copyStrategies = await Promise.all(snapshot.volumeNames.map(async (volume) => {
       const source = join(snapshotRoot(repo, options.snapshot), "volumes", volumeDirectoryName(volume));
       const destination = join(volumeRoot, volumeDirectoryName(volume));
       const strategy = await cloneDirectory(source, destination);
-      metadata.copyStrategy = mergeStrategies(metadata.copyStrategy, strategy);
-    }
+      if (genericVolumeSources.has(volume)) await makeTreeContainerWritable(destination);
+      return strategy;
+    }));
+    metadata.copyStrategy = copyStrategies.reduce(mergeStrategies, metadata.copyStrategy);
 
     await copyConfiguredFiles(repo, config, worktreePath);
     await writeFile(
       overrideFile,
       generateOverride(inspection, volumeRoot, {
         randomizePorts: true,
-        hostUserServices: new Set([...inspection.inferredStatefulServices, ...config.compose.statefulServices]),
+        hostUserServices,
+        ...(snapshot.postgresDataDirectories === undefined
+          ? {}
+          : { postgresDataDirectories: new Map(Object.entries(snapshot.postgresDataDirectories)) }),
+        mysqlLowerCaseTableNames: snapshot.mysqlLowerCaseTableNames ?? 1,
       }),
     );
     await writeInstanceMetadata(repo, slug, metadata);
@@ -251,7 +267,7 @@ async function provisionInstanceLocked(
 
     if (options.start) {
       await assertDockerReady();
-      await composeUp(runtime, config.snapshot.healthTimeoutSeconds, options.quiet ?? false);
+      await composeUp(runtime, config.snapshot.healthTimeoutSeconds, options.quiet ?? false, inspection.volumes);
       metadata.ports = await publishedPorts(runtime, inspection);
       metadata.status = "running";
     } else {
@@ -300,8 +316,9 @@ async function startInstanceLocked(
     await assertDockerReady();
     const runtime = runtimeFromMetadata(metadata);
     await validateCompose(runtime);
-    await composeUp(runtime, config.snapshot.healthTimeoutSeconds, quiet);
+    await composeUp(runtime, config.snapshot.healthTimeoutSeconds, quiet, inspection.volumes);
     metadata.ports = await publishedPorts(runtime, inspection);
+    metadata.managedVolumes = inspection.volumes;
     metadata.status = "running";
     delete metadata.error;
     metadata.updatedAt = new Date().toISOString();
@@ -323,7 +340,9 @@ export async function stopInstance(repo: RepoInfo, branch: string): Promise<Inst
 async function stopInstanceLocked(repo: RepoInfo, branch: string): Promise<InstanceMetadata> {
   const slug = safeSlug(branch);
   const metadata = await readInstanceMetadata(repo, slug);
-  await composeDownBestEffort(runtimeFromMetadata(metadata));
+  const runtime = runtimeFromMetadata(metadata);
+  await normalizeRuntimeStateOwnership(runtime, metadata.managedVolumes ?? []);
+  await composeDownBestEffort(runtime);
   metadata.status = "stopped";
   metadata.ports = [];
   delete metadata.error;
@@ -366,25 +385,40 @@ async function resetInstanceLocked(
   let pendingOverrideFile: string | undefined;
   let generationAdopted = false;
   try {
-    await composeDownBestEffort(runtimeFromMetadata(metadata));
+    const previousRuntime = runtimeFromMetadata(metadata);
+    await normalizeRuntimeStateOwnership(previousRuntime, metadata.managedVolumes ?? inspection.volumes);
+    await composeDownBestEffort(previousRuntime);
     const generation = randomUUID().slice(0, 8);
     const volumeRoot = join(root, `volumes-${generation}`);
     const overrideFile = join(root, `compose-${generation}.override.yaml`);
     pendingVolumeRoot = volumeRoot;
     pendingOverrideFile = overrideFile;
     await createExclusiveDirectory(volumeRoot);
-    let copyStrategy: CopyStrategy = "empty";
-    for (const volume of snapshot.volumeNames) {
+    const hostUserServices = new Set<string>();
+    const databaseServices = new Set([...inspection.postgresServices, ...inspection.mysqlServices]);
+    const genericVolumeSources = new Set(
+      inspection.volumes
+        .filter((volume) => !databaseServices.has(volume.service) && !volume.readOnly)
+        .map((volume) => volume.source),
+    );
+    const copyStrategies = await Promise.all(snapshot.volumeNames.map(async (volume) => {
       const source = join(snapshotRoot(repo, metadata.snapshot), "volumes", volumeDirectoryName(volume));
       const destination = join(volumeRoot, volumeDirectoryName(volume));
-      copyStrategy = mergeStrategies(copyStrategy, await cloneDirectory(source, destination));
-    }
+      const strategy = await cloneDirectory(source, destination);
+      if (genericVolumeSources.has(volume)) await makeTreeContainerWritable(destination);
+      return strategy;
+    }));
+    const copyStrategy = copyStrategies.reduce(mergeStrategies, "empty" as CopyStrategy);
 
     await writeFile(
       overrideFile,
       generateOverride(inspection, volumeRoot, {
         randomizePorts: true,
-        hostUserServices: new Set([...inspection.inferredStatefulServices, ...config.compose.statefulServices]),
+        hostUserServices,
+        ...(snapshot.postgresDataDirectories === undefined
+          ? {}
+          : { postgresDataDirectories: new Map(Object.entries(snapshot.postgresDataDirectories)) }),
+        mysqlLowerCaseTableNames: snapshot.mysqlLowerCaseTableNames ?? 1,
       }),
     );
     const runtime = {
@@ -399,6 +433,7 @@ async function resetInstanceLocked(
     metadata.ports = [];
     metadata.volumeRoot = volumeRoot;
     metadata.overrideFile = overrideFile;
+    metadata.managedVolumes = inspection.volumes;
     metadata.status = "creating";
     delete metadata.error;
     metadata.updatedAt = new Date().toISOString();
@@ -407,7 +442,7 @@ async function resetInstanceLocked(
     await writeJsonAtomic(join(root, "context.json"), instanceContext(metadata));
     if (start) {
       await assertDockerReady();
-      await composeUp(runtime, config.snapshot.healthTimeoutSeconds);
+      await composeUp(runtime, config.snapshot.healthTimeoutSeconds, false, inspection.volumes);
       metadata.ports = await publishedPorts(runtime, inspection);
       metadata.status = "running";
     } else {
@@ -450,6 +485,29 @@ export async function destroyInstance(
   });
 }
 
+export async function destroyInstanceIfUnchanged(
+  repo: RepoInfo,
+  expected: Pick<InstanceMetadata, "branch" | "status" | "updatedAt">,
+  removeWorktree: boolean,
+): Promise<
+  | { removed: true; runtimeRemoved: boolean; worktreeRemoved: boolean }
+  | { removed: false; reason: string }
+> {
+  return await withLock(repo, instanceLockScope(expected.branch), "garbage collect", async () => {
+    const root = instanceRoot(repo, safeSlug(expected.branch));
+    if (!(await pathExists(root))) return { removed: false, reason: "instance disappeared before collection" };
+    const current = await readInstanceMetadata(repo, safeSlug(expected.branch));
+    if (current.updatedAt !== expected.updatedAt || current.status !== expected.status) {
+      return { removed: false, reason: `instance changed to ${current.status} before collection` };
+    }
+    if (current.status !== "stopped" && current.status !== "failed") {
+      return { removed: false, reason: `status ${current.status} is not collectible` };
+    }
+    const result = await destroyInstanceLocked(repo, current.branch, removeWorktree);
+    return { removed: true, ...result };
+  });
+}
+
 async function destroyInstanceLocked(
   repo: RepoInfo,
   branch: string,
@@ -467,6 +525,7 @@ async function destroyInstanceLocked(
   }
   const runtime = runtimeFromMetadata(metadata);
   if ((await Promise.all(runtime.composeFiles.map(async (file) => await pathExists(file)))).every(Boolean) && (await pathExists(runtime.overrideFile))) {
+    await normalizeRuntimeStateOwnership(runtime, metadata.managedVolumes ?? []);
     await composeDownBestEffort(runtime);
   }
 

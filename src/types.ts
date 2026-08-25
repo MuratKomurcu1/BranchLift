@@ -47,6 +47,7 @@ export interface ComposeInspection {
   services: string[];
   inferredStatefulServices: string[];
   postgresServices: string[];
+  postgresDataDirectories: Record<string, string>;
   mysqlServices: string[];
   serviceCommands: Record<string, string | string[]>;
   volumes: VolumeBinding[];
@@ -73,6 +74,9 @@ export interface SnapshotMetadata {
   volumeNames: string[];
   sizeBytes?: number;
   copyStrategy?: CopyStrategy;
+  importedFromProject?: string;
+  postgresDataDirectories?: Record<string, string | false>;
+  mysqlLowerCaseTableNames?: 0 | 1 | 2;
   error?: string;
 }
 
@@ -101,6 +105,7 @@ export interface InstanceMetadata {
   composeFiles?: string[];
   overrideFile: string;
   volumeRoot?: string;
+  managedVolumes?: VolumeBinding[];
   composeProject: string;
   createdAt: string;
   updatedAt: string;

@@ -17,6 +17,7 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
   let orphanNetwork: string | undefined;
   let crashedSnapshotNetwork: string | undefined;
   let activeLockPath: string | undefined;
+  const importSourceProject = `branchlift-import-source-${process.pid}`;
 
   try {
     await writeFile(join(root, "compose.yaml"), composeFixture());
@@ -33,6 +34,40 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
       await run(process.execPath, [cli, "snapshot", "list", "--json"], root, env),
     ) as Array<{ name: string; status: string }>;
     assert.deepEqual(snapshots.map(({ name, status }) => ({ name, status })), [{ name: "dev", status: "ready" }]);
+
+    const sourceCompose = [
+      "compose",
+      "-f",
+      join(root, "compose.yaml"),
+      "-f",
+      join(root, "compose.dev.yaml"),
+      "-p",
+      importSourceProject,
+    ];
+    await run("docker", [...sourceCompose, "up", "-d", "--wait", "--wait-timeout", "120"], root, env);
+    await run(
+      "docker",
+      [...sourceCompose, "exec", "-T", "postgres", "psql", "-U", "postgres", "-c", "CREATE TABLE imported_probe (value text NOT NULL); INSERT INTO imported_probe VALUES ('source-state');"],
+      root,
+      env,
+    );
+    const imported = JSON.parse(
+      await run(process.execPath, [cli, "snapshot", "import", "source-copy", "--project", importSourceProject, "--json"], root, env),
+    ) as { status: string; importedFromProject?: string };
+    assert.equal(imported.status, "ready");
+    assert.equal(imported.importedFromProject, importSourceProject);
+    const restartedServices = (await run("docker", [...sourceCompose, "ps", "--status", "running", "--services"], root, env))
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+    assert.deepEqual(restartedServices.sort(), ["mysql", "postgres", "redis"]);
+    await run("docker", [...sourceCompose, "down", "--remove-orphans"], root, env);
+
+    const importedInstance = JSON.parse(
+      await run(process.execPath, [cli, "spawn", "import-check", "--snapshot", "source-copy", "--json"], root, env),
+    ) as InstanceMetadata;
+    assert.equal(await probe(importedInstance, "SELECT value FROM imported_probe"), "source-state");
+    await run(process.execPath, [cli, "destroy", "import-check", "--worktree"], root, env);
 
     const attached = JSON.parse(
       await run(process.execPath, [cli, "attach", "--json"], root, env),
@@ -221,6 +256,11 @@ test("creates two isolated stateful stacks and resets one to golden state", { sk
     if (crashedSnapshotNetwork !== undefined) {
       await runCommand("docker", ["network", "rm", crashedSnapshotNetwork], { allowFailure: true });
     }
+    await runCommand(
+      "docker",
+      ["compose", "-f", join(root, "compose.yaml"), "-f", join(root, "compose.dev.yaml"), "-p", importSourceProject, "down", "--remove-orphans"],
+      { cwd: root, env, allowFailure: true },
+    );
     const listed = await runCommand(process.execPath, [cli, "list", "--json"], { cwd: root, env, allowFailure: true });
     if (listed.exitCode === 0) {
       try {
@@ -333,6 +373,7 @@ function composeFixture(): string {
       - redisdata:/data
   mysql:
     image: mysql:8.4
+    command: ["--lower-case-table-names=1"]
     environment:
       MYSQL_ROOT_PASSWORD: branchlift
       MYSQL_DATABASE: branchlift

@@ -31,7 +31,7 @@ Source Compose files are never rewritten. BranchLift generates an additional fin
 
 Every managed volume is initialized in temporary Docker-native storage, then exported from its cleanly stopped service as host-owned snapshot files. This preserves the filesystem behavior images expect during bootstrap and prevents image-owned directories (for example Redis data) from blocking snapshot deletion on Linux.
 
-Cloned instances run configured stateful services against managed writable binds as the invoking non-root UID/GID. PostgreSQL additionally receives a nested `PGDATA` directory and socket tmpfs. This prevents a container from taking ownership of branch state while preserving APFS/reflink cloning for normal spawn and reset operations.
+PostgreSQL and MySQL clones run against managed writable binds as the invoking non-root UID/GID. PostgreSQL additionally receives a nested `PGDATA` directory and socket tmpfs. Generic volumes are prepared as container-writable but their services retain the image's declared user; this is required by images such as MinIO and ClickHouse whose entrypoints and healthchecks depend on their native runtime identity. Before teardown BranchLift asks each running service as root to return managed state ownership to the invoking host user. This keeps reset and cleanup possible without changing arbitrary application container identities.
 
 MySQL bootstrap and cloned instances use `lower_case_table_names=1`, because that value is valid on case-sensitive and case-insensitive filesystems and the setting must match the initialized data dictionary.
 
@@ -47,6 +47,8 @@ Snapshot creation follows this order:
 6. mark the snapshot immutable and ready.
 
 Filesystem cloning is never performed from a running database.
+
+`snapshot import` applies the same consistency boundary to an existing Compose project. It records exactly which services are running, stops only that set, copies each managed path through its stopped service container, and restarts the recorded set before committing the snapshot. A copy or restart failure leaves diagnostic state and never publishes a ready snapshot. Imported PostgreSQL data-directory and MySQL case-sensitivity settings are retained in snapshot metadata so later clones use the source layout.
 
 ## Instance creation
 
@@ -68,6 +70,8 @@ Locks are released in `finally` blocks before a requested agent command starts. 
 
 `branchlift exec` runs a host command in the instance worktree with the context path, Compose project, and normalized service port variables. It does not take a lifecycle lock, allowing test processes and agents to run concurrently with explicit operator controls.
 
+`branchlift gc` first selects only stopped or failed instances older than the requested threshold. Destruction acquires the same per-branch lock and compares status plus `updatedAt` again, so a concurrently restarted or otherwise changed instance is skipped. BranchLift-created worktrees may be removed; externally owned worktrees are never removed by garbage collection.
+
 ## Copy-on-write
 
 The copy layer prefers native filesystem clones:
@@ -76,7 +80,7 @@ The copy layer prefers native filesystem clones:
 - Linux Btrfs/XFS: GNU `cp -a --reflink=always`;
 - other filesystems: Node recursive copy.
 
-The fallback remains correct but loses the speed and disk-efficiency advantage. `branchlift benchmark` alternates clone and forced full-copy order, reports both sample sets, and calculates median speedup.
+The fallback remains correct but loses the speed and disk-efficiency advantage. Independent managed volumes are cloned in parallel. `branchlift benchmark` alternates clone and forced full-copy order, reports both sample sets, and calculates median speedup; the repository also contains a free GitHub Actions workflow that verifies the Linux reflink path on a disposable Btrfs filesystem.
 
 ## Crash behavior
 

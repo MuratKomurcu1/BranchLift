@@ -1,0 +1,54 @@
+name: Linux reflink benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      size_mib:
+        description: Synthetic snapshot size in MiB
+        required: true
+        default: "512"
+      iterations:
+        description: Alternating clone/full-copy iterations
+        required: true
+        default: "7"
+
+permissions:
+  contents: read
+
+jobs:
+  btrfs-reflink:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Create disposable Btrfs filesystem
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y btrfs-progs
+          truncate -s 3G /tmp/branchlift-btrfs.img
+          sudo mkfs.btrfs -f /tmp/branchlift-btrfs.img
+          sudo mkdir -p /mnt/branchlift-btrfs
+          sudo mount -o loop /tmp/branchlift-btrfs.img /mnt/branchlift-btrfs
+          sudo chown "$USER":"$(id -gn)" /mnt/branchlift-btrfs
+          mkdir -p /mnt/branchlift-btrfs/tmp
+      - name: Benchmark Linux reflink against forced full copy
+        env:
+          TMPDIR: /mnt/branchlift-btrfs/tmp
+        run: |
+          npm run build
+          node scripts/benchmark-synthetic.mjs --size-mib "${{ inputs.size_mib }}" --iterations "${{ inputs.iterations }}" \
+            | tee benchmark-linux-btrfs.json
+          node -e "const r=require('./benchmark-linux-btrfs.json');if(r.strategy!=='linux-reflink')throw new Error('Expected linux-reflink, got '+r.strategy)"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: branchlift-linux-btrfs-benchmark
+          path: benchmark-linux-btrfs.json
+          if-no-files-found: error
+      - name: Unmount disposable filesystem
+        if: always()
+        run: sudo umount /mnt/branchlift-btrfs || true

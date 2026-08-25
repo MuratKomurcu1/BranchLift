@@ -1,12 +1,18 @@
 import { BranchLiftError } from "./errors.js";
 import { runCommand } from "./process.js";
-import type { ComposeInspection, PublishedPort } from "./types.js";
+import type { ComposeInspection, PublishedPort, VolumeBinding } from "./types.js";
 
 export interface ComposeRuntime {
   cwd: string;
   composeFiles: string[];
   overrideFile: string;
   project: string;
+}
+
+export interface SourceComposeRuntime {
+  cwd: string;
+  composeFiles: string[];
+  project?: string;
 }
 
 export interface ComposeServiceStatus {
@@ -49,7 +55,12 @@ export async function validateCompose(runtime: ComposeRuntime): Promise<void> {
   await runCommand("docker", [...composeArgs(runtime), "config", "--quiet"], { cwd: runtime.cwd });
 }
 
-export async function composeUp(runtime: ComposeRuntime, timeoutSeconds: number, quiet = false): Promise<void> {
+export async function composeUp(
+  runtime: ComposeRuntime,
+  timeoutSeconds: number,
+  quiet = false,
+  managedVolumes: VolumeBinding[] = [],
+): Promise<void> {
   try {
     await runCommand(
       "docker",
@@ -62,10 +73,28 @@ export async function composeUp(runtime: ComposeRuntime, timeoutSeconds: number,
       allowFailure: true,
     });
     const detail = [logs.stdout.trim(), logs.stderr.trim()].filter(Boolean).join("\n");
+    await normalizeRuntimeStateOwnership(runtime, managedVolumes);
     await composeDownBestEffort(runtime);
     throw new BranchLiftError(
       "Compose stack failed to become healthy.",
       detail !== "" ? detail : error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+export async function normalizeRuntimeStateOwnership(
+  runtime: ComposeRuntime,
+  volumes: VolumeBinding[],
+): Promise<void> {
+  if (process.getuid === undefined || process.getgid === undefined || process.getuid() === 0) return;
+  const owner = `${process.getuid()}:${process.getgid()}`;
+  const unique = new Map(volumes.map((volume) => [`${volume.service}\0${volume.target}`, volume]));
+  for (const volume of unique.values()) {
+    if (volume.readOnly) continue;
+    await runCommand(
+      "docker",
+      [...composeArgs(runtime), "exec", "-T", "--user", "0", volume.service, "chown", "-R", owner, volume.target],
+      { cwd: runtime.cwd, allowFailure: true },
     );
   }
 }
@@ -120,6 +149,52 @@ export async function composeStop(runtime: ComposeRuntime): Promise<void> {
   });
 }
 
+export async function sourceRunningServices(runtime: SourceComposeRuntime): Promise<string[]> {
+  const result = await runCommand(
+    "docker",
+    [...sourceComposeArgs(runtime), "ps", "--status", "running", "--services"],
+    { cwd: runtime.cwd },
+  );
+  return [...new Set(result.stdout.split("\n").map((service) => service.trim()).filter(Boolean))].sort();
+}
+
+export async function stopSourceServices(runtime: SourceComposeRuntime, services: string[]): Promise<void> {
+  if (services.length === 0) return;
+  await runCommand("docker", [...sourceComposeArgs(runtime), "stop", ...services], {
+    cwd: runtime.cwd,
+  });
+}
+
+export async function startSourceServices(runtime: SourceComposeRuntime, services: string[]): Promise<void> {
+  if (services.length === 0) return;
+  await runCommand("docker", [...sourceComposeArgs(runtime), "start", ...services], {
+    cwd: runtime.cwd,
+  });
+}
+
+export async function copySourceServicePathToHost(
+  runtime: SourceComposeRuntime,
+  service: string,
+  sourcePath: string,
+  destination: string,
+): Promise<void> {
+  const container = await runCommand(
+    "docker",
+    [...sourceComposeArgs(runtime), "ps", "--all", "--quiet", service],
+    { cwd: runtime.cwd },
+  );
+  const id = container.stdout.trim().split("\n").find(Boolean);
+  if (id === undefined) {
+    throw new BranchLiftError(
+      `Cannot import ${service}:${sourcePath}; the source Compose service has no container.`,
+      "Run the source stack at least once with docker compose up -d, then retry the import.",
+    );
+  }
+  await runCommand("docker", ["cp", `${id}:${sourcePath.replace(/\/$/, "")}/.`, destination], {
+    cwd: runtime.cwd,
+  });
+}
+
 export async function copyServicePathToHost(
   runtime: ComposeRuntime,
   service: string,
@@ -165,30 +240,40 @@ export async function publishedPorts(
   runtime: ComposeRuntime,
   inspection: ComposeInspection,
 ): Promise<PublishedPort[]> {
-  const found: PublishedPort[] = [];
-  for (const binding of inspection.ports) {
+  const groups = await Promise.all(inspection.ports.map(async (binding) => {
     const target = binding.protocol === "udp" ? `${binding.target}/udp` : String(binding.target);
     const result = await runCommand("docker", [...composeArgs(runtime), "port", binding.service, target], {
       cwd: runtime.cwd,
       allowFailure: true,
     });
-    if (result.exitCode !== 0) continue;
+    if (result.exitCode !== 0) return [];
+    const found: PublishedPort[] = [];
     for (const line of result.stdout.trim().split("\n")) {
       if (line.trim() === "") continue;
       const parsed = parseAddress(line.trim());
       if (parsed === undefined) continue;
-      if (!found.some((item) => item.service === binding.service && item.target === binding.target && item.port === parsed.port)) {
-        found.push({ ...binding, host: parsed.host, port: parsed.port });
-      }
+      found.push({ ...binding, host: parsed.host, port: parsed.port });
     }
+    return found;
+  }));
+  const unique = new Map<string, PublishedPort>();
+  for (const port of groups.flat()) {
+    unique.set(`${port.service}\0${port.target}\0${port.protocol}\0${port.host}\0${port.port}`, port);
   }
-  return found;
+  return [...unique.values()];
 }
 
 export function composeArgs(runtime: ComposeRuntime): string[] {
   const args = ["compose"];
   for (const file of runtime.composeFiles) args.push("-f", file);
   args.push("-f", runtime.overrideFile, "-p", runtime.project);
+  return args;
+}
+
+export function sourceComposeArgs(runtime: SourceComposeRuntime): string[] {
+  const args = ["compose"];
+  for (const file of runtime.composeFiles) args.push("-f", file);
+  if (runtime.project !== undefined) args.push("-p", runtime.project);
   return args;
 }
 

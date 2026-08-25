@@ -70,6 +70,7 @@ export async function inspectCompose(input: string | string[]): Promise<ComposeI
   const recommendations: string[] = [];
   const inferredStatefulServices: string[] = [];
   const postgresServices: string[] = [];
+  const postgresDataDirectories: Record<string, string> = {};
   const mysqlServices: string[] = [];
   const serviceCommands: Record<string, string | string[]> = {};
 
@@ -85,7 +86,11 @@ export async function inspectCompose(input: string | string[]): Promise<ComposeI
     }
     const stateful = statefulPattern.test(`/${serviceName}`) || statefulPattern.test(`/${image}`);
     if (stateful) inferredStatefulServices.push(serviceName);
-    if (/(?:^|[\/_-])postgres(?:ql)?(?::|$|[\/_-])/i.test(`/${image}`)) postgresServices.push(serviceName);
+    if (/(?:^|[\/_-])postgres(?:ql)?(?::|$|[\/_-])/i.test(`/${image}`)) {
+      postgresServices.push(serviceName);
+      const pgdata = environmentValue(rawService.environment, "PGDATA");
+      if (pgdata !== undefined && pgdata !== "") postgresDataDirectories[serviceName] = pgdata;
+    }
     if (/(?:^|[\/_-])mysql(?::|$|[\/_-])/i.test(`/${image}`)) mysqlServices.push(serviceName);
 
     if (typeof rawService.container_name === "string") {
@@ -149,6 +154,7 @@ export async function inspectCompose(input: string | string[]): Promise<ComposeI
     services,
     inferredStatefulServices: inferredStatefulServices.sort(),
     postgresServices: postgresServices.sort(),
+    postgresDataDirectories,
     mysqlServices: mysqlServices.sort(),
     serviceCommands,
     volumes,
@@ -193,6 +199,7 @@ export function generateOverride(
   options: {
     randomizePorts: boolean;
     postgresHostUser?: { uid: number; gid: number } | false;
+    postgresDataDirectories?: ReadonlyMap<string, string | false>;
     mysqlHostUser?: { uid: number; gid: number } | false;
     bindHostUser?: { uid: number; gid: number } | false;
     hostUserServices?: ReadonlySet<string>;
@@ -209,11 +216,12 @@ export function generateOverride(
   const bindHostUser = options.bindHostUser === false
     ? undefined
     : options.bindHostUser ?? localBindUser();
-  const hostUserServices = options.hostUserServices ?? new Set(inspection.inferredStatefulServices);
+  const hostUserServices = options.hostUserServices ?? new Set<string>();
   const mysqlLowerCaseTableNames = options.mysqlLowerCaseTableNames === false
     ? undefined
     : options.mysqlLowerCaseTableNames ?? 1;
   const nativeVolumes = options.nativeVolumes ?? new Map<string, string>();
+  const postgresDataDirectories = options.postgresDataDirectories;
   const byService = new Map<string, VolumeBinding[]>();
   for (const volume of inspection.volumes) {
     const existing = byService.get(volume.service) ?? [];
@@ -252,8 +260,13 @@ export function generateOverride(
     if (inspection.postgresServices.includes(service) && serviceVolumes.length > 0) {
       const dataVolume = selectPostgresDataVolume(serviceVolumes);
       if (dataVolume !== undefined) {
-        lines.push("    environment:");
-        lines.push(`      PGDATA: ${quote(`${dataVolume.target}/.branchlift-pgdata`)}`);
+        const configured = postgresDataDirectories?.has(service) === true
+          ? postgresDataDirectories.get(service)
+          : `${dataVolume.target}/.branchlift-pgdata`;
+        if (configured !== false && configured !== undefined) {
+          lines.push("    environment:");
+          lines.push(`      PGDATA: ${quote(configured)}`);
+        }
       }
       if (postgresHostUser !== undefined) {
         lines.push(`    user: ${quote(`${postgresHostUser.uid}:${postgresHostUser.gid}`)}`);
@@ -318,6 +331,19 @@ function localBindUser(): { uid: number; gid: number } | undefined {
   const uid = process.getuid();
   const gid = process.getgid();
   return uid > 0 ? { uid, gid } : undefined;
+}
+
+function environmentValue(value: unknown, name: string): string | undefined {
+  if (isMap(value)) {
+    const found = value[name];
+    return typeof found === "string" || typeof found === "number" ? String(found) : undefined;
+  }
+  if (Array.isArray(value)) {
+    const prefix = `${name}=`;
+    const found = value.find((item) => typeof item === "string" && item.startsWith(prefix));
+    return typeof found === "string" ? found.slice(prefix.length) : undefined;
+  }
+  return undefined;
 }
 
 export function postgresDataVolumeNames(inspection: ComposeInspection): string[] {

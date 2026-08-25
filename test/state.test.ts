@@ -7,6 +7,7 @@ import { BranchLiftError } from "../src/errors.js";
 import { pathExists, repoDataRoot, snapshotRoot } from "../src/paths.js";
 import {
   deleteSnapshot,
+  isSnapshotMetadata,
   listSnapshots,
   writeInstanceMetadata,
   writeSnapshotMetadata,
@@ -57,6 +58,20 @@ test("refuses snapshot deletion when instance metadata cannot be audited", async
     await assert.rejects(deleteSnapshot(repo, "dev"), /Cannot prove the snapshot is unused/);
     assert.equal(await pathExists(snapshotRoot(repo, "dev")), true);
   });
+});
+
+test("validates imported database layout metadata", () => {
+  const repo = { root: "/repo", commonDir: "/repo/.git", name: "demo", key: "demo-key" };
+  const metadata = {
+    ...snapshot(repo, "imported", "2026-01-01T00:00:00.000Z"),
+    importedFromProject: "existing-stack",
+    postgresDataDirectories: { postgres: "/var/lib/postgresql/data", archive: false },
+    mysqlLowerCaseTableNames: 1,
+  };
+  assert.equal(isSnapshotMetadata(metadata), true);
+  assert.equal(isSnapshotMetadata({ ...metadata, postgresDataDirectories: { postgres: 42 } }), false);
+  assert.equal(isSnapshotMetadata({ ...metadata, mysqlLowerCaseTableNames: 3 }), false);
+  assert.equal(isSnapshotMetadata({ ...metadata, mysqlLowerCaseTableNames: "1" }), false);
 });
 
 async function withState(run: (repo: RepoInfo) => Promise<void>): Promise<void> {

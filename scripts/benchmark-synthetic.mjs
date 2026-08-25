@@ -5,6 +5,7 @@ import { benchmarkSnapshot } from "../dist/src/benchmark.js";
 import { snapshotRoot } from "../dist/src/paths.js";
 import { volumeDirectoryName } from "../dist/src/compose.js";
 import { writeSnapshotMetadata } from "../dist/src/state.js";
+import { runCommand } from "../dist/src/process.js";
 
 const sizeMiB = integerOption("--size-mib", 64, 1, 4096);
 const iterations = integerOption("--iterations", 5, 1, 100);
@@ -34,8 +35,21 @@ await writeSnapshotMetadata(repo, "synthetic", {
 });
 
 const result = await benchmarkSnapshot(repo, "synthetic", iterations);
+let filesystem = await runCommand("df", ["-T", root], { allowFailure: true });
+if (filesystem.exitCode !== 0) filesystem = await runCommand("df", [root], { allowFailure: true });
 await rm(root, { recursive: true, force: true });
-console.log(JSON.stringify({ fixtureMiB: sizeMiB, ...result }, null, 2));
+console.log(JSON.stringify({
+  generatedAt: new Date().toISOString(),
+  fixtureMiB: sizeMiB,
+  methodology: "alternating native clone/reflink and forced full-copy samples on the same warm filesystem",
+  platform: {
+    node: process.version,
+    os: process.platform,
+    arch: process.arch,
+    filesystem: filesystem.stdout.trim().split("\n").filter(Boolean).at(-1),
+  },
+  ...result,
+}, null, 2));
 
 function integerOption(name, fallback, minimum, maximum) {
   const index = process.argv.indexOf(name);

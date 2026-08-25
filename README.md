@@ -89,6 +89,17 @@ It automatically includes the standard `compose.override.yaml`/`docker-compose.o
 branchlift snapshot dev
 ```
 
+If the project's normal Compose stack already contains the state you want, import it instead of rebuilding and reseeding it:
+
+```bash
+branchlift snapshot import dev
+
+# Supply the same project name used by `docker compose -p` when needed
+branchlift snapshot import dev --project my-existing-stack
+```
+
+Import records the currently running services, stops only those services for a crash-consistent filesystem copy, and restores them before returning. The resulting snapshot is immutable; BranchLift never clones a running database.
+
 Spawn isolated branches and optionally launch an agent in each one:
 
 ```bash
@@ -138,6 +149,15 @@ Clean up runtime state while preserving the Git worktree and branch:
 ```bash
 branchlift destroy agent/fix-auth
 ```
+
+Preview or remove old stopped/failed environments in bulk:
+
+```bash
+branchlift gc --older-than 7d --dry-run
+branchlift gc --older-than 7d
+```
+
+Garbage collection never selects running/creating instances, rechecks candidates under their lifecycle lock, and removes only BranchLift-owned worktrees. External worktrees are preserved.
 
 Remove the worktree too, but only if it is clean:
 
@@ -200,6 +220,7 @@ The older `compose.file: compose.yaml` form remains readable.
   branchlift init [--compose FILE]... [--dry-run] [--json]
 branchlift inspect [--json]
 branchlift snapshot [create] [NAME]
+branchlift snapshot import [NAME] [--project COMPOSE_PROJECT] [--json]
 branchlift snapshot list [--json]
 branchlift snapshot delete NAME
 branchlift spawn BRANCH [--snapshot NAME] [--no-start] [-- AGENT ...]
@@ -213,6 +234,7 @@ branchlift preview [BRANCH] [--json]
 branchlift logs [BRANCH] [--service NAME] [--tail N] [--follow] [--timestamps]
 branchlift destroy BRANCH [--worktree]
 branchlift doctor [--fix] [--json]
+branchlift gc [--older-than 7d] [--dry-run] [--json]
 branchlift benchmark [SNAPSHOT] [--iterations N] [--json]
 branchlift agents install [all|codex|claude|cursor] [--dry-run] [--json]
 branchlift mcp

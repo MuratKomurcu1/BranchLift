@@ -26,6 +26,22 @@ Interpretation:
 
 The synthetic command is an implementation proof, not a universal performance claim. Project decisions should use the real snapshot command on the target workstation.
 
+## Linux reflink reproduction
+
+The manual `Linux reflink benchmark` GitHub Actions workflow creates a disposable 3 GiB Btrfs loop filesystem on a public Ubuntu runner, places the entire fixture and temporary copies on that filesystem, and runs the same alternating benchmark. It fails unless the implementation actually reports `linux-reflink`; the JSON artifact includes raw samples, platform details, filesystem output, and methodology. It uses only the free runner and public Actions artifact storage.
+
+For an equivalent local run on Btrfs or reflink-capable XFS:
+
+```bash
+npm run benchmark:synthetic -- --size-mib 512 --iterations 7
+```
+
+Recorded Linux results are committed under `benchmarks/` after the public workflow completes; workflow artifacts remain the independently reproducible source.
+
+## Real-project lifecycle evidence
+
+The `Real project evidence` workflow runs a matrix against pinned upstream Docmost, n8n Hosting, and Langfuse Compose files. Every job resolves pulled images to immutable digests, then performs snapshot, spawn, HTTP readiness, PostgreSQL golden-state verification, mutation, reset, post-reset readiness/state verification, preview, and destroy. Langfuse additionally exercises ClickHouse, MinIO, and Redis managed volumes. See [EVIDENCE.md](EVIDENCE.md) for the exact contract and results.
+
 ## Real-project comparison: Docmost
 
 The Docmost harness compares the complete time until its HTTP application responds:

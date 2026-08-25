@@ -35,22 +35,23 @@ export async function benchmarkSnapshot(repo: RepoInfo, name: string, iterations
       const runClone = async (): Promise<void> => {
         await mkdir(cloneRoot, { recursive: true });
         const started = performance.now();
-        for (const volume of snapshot.volumeNames) {
+        const strategies = await Promise.all(snapshot.volumeNames.map(async (volume) => {
           const source = join(snapshotRoot(repo, name), "volumes", volumeDirectoryName(volume));
           const destination = join(cloneRoot, volumeDirectoryName(volume));
-          strategy = mergeStrategies(strategy, await cloneDirectory(source, destination));
-        }
+          return await cloneDirectory(source, destination);
+        }));
+        strategy = strategies.reduce(mergeStrategies, strategy);
         cloneSamples.push(performance.now() - started);
         await rm(cloneRoot, { recursive: true, force: true });
       };
       const runFullCopy = async (): Promise<void> => {
         await mkdir(copyRoot, { recursive: true });
         const started = performance.now();
-        for (const volume of snapshot.volumeNames) {
+        await Promise.all(snapshot.volumeNames.map(async (volume) => {
           const source = join(snapshotRoot(repo, name), "volumes", volumeDirectoryName(volume));
           const destination = join(copyRoot, volumeDirectoryName(volume));
           await copyDirectoryFull(source, destination);
-        }
+        }));
         fullCopySamples.push(performance.now() - started);
         await rm(copyRoot, { recursive: true, force: true });
       };

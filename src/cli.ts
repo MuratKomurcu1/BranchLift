@@ -10,6 +10,7 @@ import { assertDockerReady } from "./docker.js";
 import { applyDoctorFixes, auditState, inspectDockerProjects } from "./doctor.js";
 import { BranchLiftError } from "./errors.js";
 import { currentBranch, discoverRepo } from "./git.js";
+import { collectGarbage, parseAge } from "./gc.js";
 import { runMcpServer } from "./mcp.js";
 import { humanBytes, safeSlug } from "./paths.js";
 import { previewInstances, readInstanceLogs } from "./preview.js";
@@ -24,7 +25,7 @@ import {
   startInstance,
   stopInstance,
 } from "./runtime.js";
-import { createSnapshot } from "./snapshot.js";
+import { createSnapshot, importSnapshot } from "./snapshot.js";
 import { deleteSnapshot, listInstances, listSnapshots } from "./state.js";
 import type { ComposeInspection, InstanceMetadata } from "./types.js";
 import { version } from "./version.js";
@@ -137,6 +138,24 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
           assertNoArgs(args);
           await deleteSnapshot(repo, name);
           console.log(`Deleted immutable snapshot ${name}.`);
+          return 0;
+        }
+        if (action === "import") {
+          args.shift();
+          const json = takeFlag(args, "--json");
+          const sourceProject = takeOption(args, "--project");
+          const config = await loadConfig(repo);
+          const inspection = await inspectConfiguredCompose(repo, config);
+          const name = args.shift() ?? config.snapshot.default;
+          assertNoArgs(args);
+          if (!json) console.log(`Importing immutable snapshot ${name} from the source Compose stack...`);
+          const result = await importSnapshot(repo, config, inspection, name, sourceProject);
+          if (json) console.log(JSON.stringify(result.metadata, null, 2));
+          else {
+            console.log(`Snapshot ${name} imported; source services were restored.`);
+            console.log(`State: ${result.path}`);
+            console.log(`Logical size: ${humanBytes(result.metadata.sizeBytes ?? 0)}`);
+          }
           return 0;
         }
         if (action === "create") args.shift();
@@ -307,6 +326,29 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         return dockerReady && inspection.blockers.length === 0 && !report.findings.some(({ severity }) => severity === "error")
           ? 0
           : 2;
+      }
+      case "gc": {
+        const ageValue = takeOption(args, "--older-than") ?? "7d";
+        const dryRun = takeFlag(args, "--dry-run");
+        const json = takeFlag(args, "--json");
+        assertNoArgs(args);
+        const olderThanMs = parseAge(ageValue);
+        if (olderThanMs === undefined) {
+          throw new BranchLiftError("--older-than must be a positive duration such as 30m, 24h, 7d, or 2w.");
+        }
+        const result = await collectGarbage(repo, { olderThanMs, dryRun });
+        if (json) console.log(JSON.stringify(result, null, 2));
+        else {
+          for (const entry of result.entries) {
+            const size = humanBytes(entry.logicalBytes);
+            if (entry.action === "skipped") console.log(`skipped ${entry.branch} (${entry.reason ?? "changed"})`);
+            else console.log(`${entry.action} ${entry.branch} (${entry.status}, ${size})`);
+          }
+          if (result.entries.length === 0) console.log("No stopped or failed instances matched the age threshold.");
+          if (dryRun) console.log(`Dry run: ${result.eligible} instance(s) eligible; nothing was removed.`);
+          else console.log(`Removed ${result.removed} instance(s); reclaimed ${humanBytes(result.reclaimedBytes)} logical.`);
+        }
+        return 0;
       }
       case "benchmark": {
         const json = takeFlag(args, "--json");
@@ -505,6 +547,7 @@ Usage:
   branchlift init [--compose FILE]... [--dry-run] [--json]
   branchlift inspect [--json]
   branchlift snapshot [create] [NAME]
+  branchlift snapshot import [NAME] [--project COMPOSE_PROJECT] [--json]
   branchlift snapshot list [--json]
   branchlift snapshot delete NAME
   branchlift spawn BRANCH [--snapshot NAME] [--no-start] [-- AGENT ...]
@@ -518,6 +561,7 @@ Usage:
   branchlift logs [BRANCH] [--service NAME] [--tail N] [--follow] [--timestamps]
   branchlift destroy BRANCH [--worktree]
   branchlift doctor [--fix] [--json]
+  branchlift gc [--older-than 7d] [--dry-run] [--json]
   branchlift benchmark [SNAPSHOT] [--iterations N]
   branchlift agents install [all|codex|claude|cursor] [--dry-run] [--json]
   branchlift mcp
@@ -531,6 +575,7 @@ Examples:
   branchlift preview
   branchlift logs fix-auth --service api --tail 100
   branchlift reset fix-auth
+  branchlift gc --older-than 7d --dry-run
   branchlift exec fix-auth -- npm test
 
 Snapshots are immutable. destroy removes BranchLift runtime state but preserves the Git

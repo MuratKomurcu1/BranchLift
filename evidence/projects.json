@@ -1,0 +1,45 @@
+[
+  {
+    "slug": "docmost",
+    "name": "Docmost",
+    "repo": "docmost/docmost",
+    "commit": "cd597f0161ab0221cae912cd9f8f71e2da6e607d",
+    "path": "docker-compose.yml",
+    "appService": "docmost",
+    "appPort": 3000,
+    "readyPath": "/",
+    "dbService": "db",
+    "dbUser": "docmost",
+    "database": "docmost",
+    "statefulServices": ["docmost", "db", "redis"]
+  },
+  {
+    "slug": "n8n",
+    "name": "n8n Hosting",
+    "repo": "n8n-io/n8n-hosting",
+    "commit": "6b78193475d84ae190622d8a8e9ba8598e89b7d1",
+    "path": "docker-compose/withPostgres/docker-compose.yml",
+    "support": ["docker-compose/withPostgres/init-data.sh"],
+    "appService": "n8n",
+    "appPort": 5678,
+    "readyPath": "/healthz",
+    "dbService": "postgres",
+    "dbUser": "branchlift_root",
+    "database": "n8n",
+    "statefulServices": ["n8n", "postgres"]
+  },
+  {
+    "slug": "langfuse",
+    "name": "Langfuse",
+    "repo": "langfuse/langfuse",
+    "commit": "ea3c905cd535fb7d54c008ed8ea89d6f3ba684b9",
+    "path": "docker-compose.yml",
+    "appService": "langfuse-web",
+    "appPort": 3000,
+    "readyPath": "/api/public/health",
+    "dbService": "postgres",
+    "dbUser": "postgres",
+    "database": "postgres",
+    "statefulServices": ["clickhouse", "minio", "postgres", "redis"]
+  }
+]

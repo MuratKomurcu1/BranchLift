@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { cp, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { BranchLiftError } from "./errors.js";
@@ -118,6 +118,14 @@ export async function copyDirectoryFull(source: string, destination: string): Pr
     await resetCopyDestination(destination);
   }
   await copyDirectoryEntries(source, destination, entries);
+}
+
+export async function makeTreeContainerWritable(path: string): Promise<void> {
+  const info = await lstat(path);
+  if (info.isSymbolicLink()) return;
+  await chmod(path, (info.mode & 0o777) | (info.isDirectory() ? 0o777 : 0o666));
+  if (!info.isDirectory()) return;
+  for (const entry of await readdir(path)) await makeTreeContainerWritable(join(path, entry));
 }
 
 async function copyDirectoryEntries(source: string, destination: string, entries: string[]): Promise<void> {

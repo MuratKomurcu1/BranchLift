@@ -23,6 +23,7 @@
     "docs",
     "examples",
     "compatibility",
+    "evidence",
     "benchmarks",
     "scripts"
   ],
@@ -34,6 +35,7 @@
     "test:compat": "npm run build && node scripts/compatibility.mjs",
     "benchmark:synthetic": "npm run build && node scripts/benchmark-synthetic.mjs",
     "benchmark:docmost": "npm run build && node scripts/benchmark-docmost.mjs",
+    "evidence:project": "npm run build && node scripts/real-project-evidence.mjs",
     "verify": "npm run check && npm test && npm audit --audit-level=high && npm pack --dry-run",
     "start": "node dist/src/cli.js",
     "prepack": "npm run build"

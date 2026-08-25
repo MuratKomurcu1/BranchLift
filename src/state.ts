@@ -129,6 +129,7 @@ export function isInstanceMetadata(value: unknown): value is InstanceMetadata {
     && (value.composeFiles === undefined || stringArray(value.composeFiles))
     && typeof value.overrideFile === "string"
     && (value.volumeRoot === undefined || typeof value.volumeRoot === "string")
+    && (value.managedVolumes === undefined || volumeBindings(value.managedVolumes))
     && typeof value.composeProject === "string"
     && typeof value.createdAt === "string"
     && typeof value.updatedAt === "string"
@@ -146,7 +147,11 @@ export function isSnapshotMetadata(value: unknown): value is SnapshotMetadata {
     && typeof value.composeProject === "string"
     && typeof value.createdAt === "string"
     && ["building", "ready", "failed"].includes(String(value.status))
-    && stringArray(value.volumeNames);
+    && stringArray(value.volumeNames)
+    && (value.importedFromProject === undefined || typeof value.importedFromProject === "string")
+    && (value.postgresDataDirectories === undefined || postgresDataDirectories(value.postgresDataDirectories))
+    && (value.mysqlLowerCaseTableNames === undefined
+      || (typeof value.mysqlLowerCaseTableNames === "number" && [0, 1, 2].includes(value.mysqlLowerCaseTableNames)));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -155,4 +160,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function volumeBindings(value: unknown): boolean {
+  return Array.isArray(value) && value.every((item) => isRecord(item)
+    && typeof item.source === "string"
+    && typeof item.target === "string"
+    && typeof item.service === "string"
+    && typeof item.readOnly === "boolean"
+    && typeof item.external === "boolean");
+}
+
+function postgresDataDirectories(value: unknown): boolean {
+  return isRecord(value) && Object.values(value).every((directory) => typeof directory === "string" || directory === false);
 }
